@@ -23,10 +23,15 @@ public class RtcTagList implements Iterable<RtcTag> {
 		rtcTags = new ArrayList<RtcTag>();
 	}
 
+	/**
+	 * Adds the tag, or merges it into an existing tag of the same baseline group (see {@link RtcTag#matches}).
+	 *
+	 * @return the tag that is now in the list
+	 */
 	public RtcTag add(RtcTag tag) {
 		long creationDate = tag.getCreationDate();
-		int tagIndex = rtcTags.indexOf(tag);
-		if (tagIndex < 0) {
+		RtcTag existing = find(tag.getOriginalName(), creationDate);
+		if (existing == null) {
 			for (RtcTag tagToCheck : rtcTags) {
 				if (tagToCheck.getOriginalName().equals(tag.getOriginalName())) {
 					tag.setMakeNameUnique(true);
@@ -35,10 +40,19 @@ public class RtcTagList implements Iterable<RtcTag> {
 			}
 			rtcTags.add(tag);
 		} else {
-			tag = rtcTags.get(tagIndex);
+			tag = existing.addBaselineUuids(tag);
 			tag.setCreationDate(creationDate / 2 + tag.getCreationDate() / 2);
 		}
 		return tag;
+	}
+
+	RtcTag find(String originalName, long creationDate) {
+		for (RtcTag tag : rtcTags) {
+			if (tag.matches(originalName, creationDate)) {
+				return tag;
+			}
+		}
+		return null;
 	}
 
 	public void printTagList(boolean printChangesetDetails) {
@@ -52,7 +66,7 @@ public class RtcTagList implements Iterable<RtcTag> {
 					+ "] created at [" + (new Date(tag.getCreationDate())) + "] total number of changesets ["
 					+ totalChangeSetsByBaseline + "] will be tagged [" + tag.doCreateTag() + "]");
 			for (Entry<String, List<RtcChangeSet>> entry : tag.getComponentsChangeSets().entrySet()) {
-				output.writeLine("      number of changesets  for component [" + entry.getKey() + "] is ["
+				output.writeLine("      number of changesets  for component [" + entry.getValue().get(0).getComponent() + "] is ["
 						+ entry.getValue().size() + "]");
 			}
 			if (printChangesetDetails) {
@@ -95,6 +109,7 @@ public class RtcTagList implements Iterable<RtcTag> {
 						.setCreationDate(currentTag.getCreationDate()).setMakeNameUnique(currentTag.isMakeNameUnique())
 						.setDoCreateTag(currentTag.doCreateTag());
 				tmpTag.addAll(currentTag.getComponentsChangeSets());
+				tmpTag.addBaselineUuids(currentTag);
 			}
 
 			Matcher matcher = includePattern.matcher(tmpTag.getOriginalName());
@@ -124,33 +139,32 @@ public class RtcTagList implements Iterable<RtcTag> {
 	}
 
 	public RtcTag getTag(String itemId, String tagName, long creationDate) {
-		RtcTag tag = new RtcTag(itemId).setOriginalName(tagName).setCreationDate(creationDate);
-		int tagIndex = rtcTags.indexOf(tag);
-		if (tagIndex < 0) {
+		for (RtcTag tag : rtcTags) {
+			if (itemId != null && tag.hasBaseline(itemId)) {
+				return tag;
+			}
+		}
+		RtcTag tag = find(tagName, creationDate);
+		if (tag == null) {
 			output.writeLine("Error: Tag could not be found in Stream");
 			output.writeLine("Searching for Tag: [" + tagName + "] ["
 					+ (new SimpleDateFormat("yyyyMMdd_HHmmss")).format(new Date(creationDate)) + "]");
 			sortByCreationDate();
 			printTagList(false);
 			throw new RuntimeException("Tag not found");
-		} else {
-			tag = rtcTags.get(tagIndex);
 		}
 		return tag;
 	}
 
 	public RtcTag getHeadTag() {
-		RtcTag tag = new RtcTag(null).setDoCreateTag(false).setOriginalName("HEAD").setCreationDate(Long.MAX_VALUE);
-		int tagIndex = rtcTags.indexOf(tag);
-		if (tagIndex < 0) {
-			add(tag);
-		} else {
-			tag = rtcTags.get(tagIndex);
+		RtcTag tag = find("HEAD", Long.MAX_VALUE);
+		if (tag == null) {
+			tag = add(new RtcTag(null).setDoCreateTag(false).setOriginalName("HEAD").setCreationDate(Long.MAX_VALUE));
 		}
 		return tag;
 	}
 
 	public Boolean contains(RtcTag tag) {
-		return Boolean.valueOf(rtcTags.contains(tag));
+		return Boolean.valueOf(find(tag.getOriginalName(), tag.getCreationDate()) != null);
 	}
 }

@@ -2,11 +2,15 @@ package to.rtc.cli.migrate;
 
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
 import java.util.Date;
 import java.util.HashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
+import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -18,6 +22,8 @@ final class RtcTag implements Tag {
 	private static final long TIME_DIFFERENCE_PLUS_MINUS_MILLISECONDS = TimeUnit.SECONDS.toMillis(90);
 	private static final RtcChangeSet EARLYEST_CHANGESET = new RtcChangeSet("").setCreationDate(Long.MAX_VALUE);
 	private String uuid;
+	// all baselines (one per component) grouped into this tag
+	private final Set<String> baselineUuids;
 	private String originalName;
 	private boolean makeNameUnique;
 	private long creationDate;
@@ -28,6 +34,8 @@ final class RtcTag implements Tag {
 
 	RtcTag(String uuid) {
 		this.uuid = uuid;
+		baselineUuids = new LinkedHashSet<String>();
+		addBaselineUuid(uuid);
 		components = new HashMap<String, List<RtcChangeSet>>();
 		totalChangeSetCount = 0;
 		makeNameUnique = false;
@@ -51,12 +59,43 @@ final class RtcTag implements Tag {
 
 	RtcTag setUuid(String uuid) {
 		this.uuid = uuid;
+		addBaselineUuid(uuid);
 		return this;
+	}
+
+	RtcTag addBaselineUuid(String baselineUuid) {
+		if (baselineUuid != null) {
+			baselineUuids.add(baselineUuid);
+		}
+		return this;
+	}
+
+	RtcTag addBaselineUuids(RtcTag other) {
+		baselineUuids.addAll(other.baselineUuids);
+		return this;
+	}
+
+	@Override
+	public Collection<String> getBaselineUuids() {
+		return Collections.unmodifiableSet(baselineUuids);
+	}
+
+	boolean hasBaseline(String baselineUuid) {
+		return baselineUuids.contains(baselineUuid);
+	}
+
+	/**
+	 * Baselines of different components that share a name and were created within
+	 * {@link #TIME_DIFFERENCE_PLUS_MINUS_MILLISECONDS} of each other belong to the same tag.
+	 */
+	boolean matches(String otherOriginalName, long otherCreationDate) {
+		return originalName.equals(otherOriginalName)
+				&& Math.abs(otherCreationDate - creationDate) <= TIME_DIFFERENCE_PLUS_MINUS_MILLISECONDS;
 	}
 
 	void add(RtcChangeSet changeSet) {
 		List<RtcChangeSet> changesets = null;
-		String component = changeSet.getComponent();
+		String component = changeSet.getComponentKey();
 		if (components.containsKey(component)) {
 			changesets = components.get(component);
 		} else {
@@ -98,7 +137,7 @@ final class RtcTag implements Tag {
 				}
 			}
 		}
-		changeSetOrderIndex.get(earlyestChangeSet.getComponent()).incrementAndGet();
+		changeSetOrderIndex.get(earlyestChangeSet.getComponentKey()).incrementAndGet();
 		return earlyestChangeSet;
 	}
 
@@ -135,46 +174,12 @@ final class RtcTag implements Tag {
 	}
 
 	@Override
-	public int hashCode() {
-		final int prime = 31;
-		int result = 1;
-		result = prime * result + ((components == null) ? 0 : components.hashCode());
-		result = prime * result + (int) (creationDate ^ (creationDate >>> 32));
-		result = prime * result + (makeNameUnique ? 1231 : 1237);
-		result = prime * result + ((originalName == null) ? 0 : originalName.hashCode());
-		result = prime * result + (int) (totalChangeSetCount ^ (totalChangeSetCount >>> 32));
-		result = prime * result + ((uuid == null) ? 0 : uuid.hashCode());
-		return result;
-	}
-
-	@Override
-	public boolean equals(Object obj) {
-		if (obj == this) {
-			return true;
-		}
-		if (obj == null) {
-			return false;
-		}
-		if (obj.getClass() == getClass()) {
-			RtcTag tag = (RtcTag) obj;
-			long objCreationDate = tag.getCreationDate();
-			if (getOriginalName().equals(tag.getOriginalName())) {
-				if ((objCreationDate == this.creationDate)
-						|| ((objCreationDate <= this.creationDate + TIME_DIFFERENCE_PLUS_MINUS_MILLISECONDS) && (objCreationDate >= this.creationDate
-								- TIME_DIFFERENCE_PLUS_MINUS_MILLISECONDS))) {
-					return true;
-				}
-			}
-		}
-		return false;
-	}
-
-	@Override
 	public String toString() {
 		return (new StringBuilder(getName())).append('@').append(new Date(creationDate)).toString();
 	}
 
-	String getOriginalName() {
+	@Override
+	public String getOriginalName() {
 		return originalName;
 	}
 

@@ -214,7 +214,8 @@ public abstract class MigrateTo extends AbstractSubcommand implements ISubcomman
 				// select first change set if there are any
 				if (!changeSets.isEmpty()) {
 					IChangeSetHandle changeSetHandle = changeSets.get(changeSets.size() - 1).changeSet();
-					lastChangeSets.put(component.getName(), changeSetHandle.getItemId().getUuidValue());
+					lastChangeSets.put(component.getItemId().getUuidValue(),
+							changeSetHandle.getItemId().getUuidValue());
 				}
 			}
 		} catch (TeamRepositoryException e) {

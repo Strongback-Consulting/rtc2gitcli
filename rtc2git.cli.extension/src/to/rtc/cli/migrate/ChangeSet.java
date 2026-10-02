@@ -45,6 +45,24 @@ public interface ChangeSet {
 	public List<WorkItem> getWorkItems();
 
 	/**
+	 * Returns the UUID of the change set in EWM, if known.
+	 *
+	 * @return the change set UUID or <code>null</code>
+	 */
+	default String getUuid() {
+		return null;
+	}
+
+	/**
+	 * Returns the user ID of the change set creator, if known.
+	 *
+	 * @return the creator user ID or <code>null</code>
+	 */
+	default String getCreatorUserId() {
+		return null;
+	}
+
+	/**
 	 * Represents a work item reference
 	 */
 	public interface WorkItem {

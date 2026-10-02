@@ -16,6 +16,8 @@ public class HistoryEntryVisitor extends BaseChangeLogEntryVisitor {
 
 	private final RtcTagList tags;
 	private String component;
+	private String componentUuid;
+	// component UUID -> UUID of the last change set in the source workspace
 	private final Map<String, String> lastChangeSets;
 	private boolean lastChangeSetReached;
 
@@ -48,7 +50,8 @@ public class HistoryEntryVisitor extends BaseChangeLogEntryVisitor {
 		RtcChangeSet changeSet = new RtcChangeSet(changeSetUuid).setText(changeSetDto.getEntryName())
 				.setCreatorName(changeSetDto.getCreator().getFullName())
 				.setCreatorEMail(changeSetDto.getCreator().getEmailAddress())
-				.setCreationDate(changeSetDto.getCreationDate()).setComponent(component);
+				.setCreationDate(changeSetDto.getCreationDate()).setComponent(component)
+				.setComponentUuid(componentUuid).setCreatorUserId(changeSetDto.getCreator().getUserId());
 		@SuppressWarnings("unchecked")
 		List<ChangeLogWorkItemEntryDTO> workItems = changeSetDto.getWorkItems();
 		if (workItems != null && !workItems.isEmpty()) {
@@ -58,7 +61,7 @@ public class HistoryEntryVisitor extends BaseChangeLogEntryVisitor {
 		}
 		RtcTag actualTag = getActualTag(parent);
 		actualTag.add(changeSet);
-		if (lastChangeSets.get(component).equals(changeSetUuid)) {
+		if (changeSetUuid.equals(lastChangeSets.get(componentUuid))) {
 			lastChangeSetReached = true;
 			actualTag.setContainLastChangeset(true);
 		}
@@ -76,6 +79,7 @@ public class HistoryEntryVisitor extends BaseChangeLogEntryVisitor {
 	@Override
 	protected void visitComponent(ChangeLogEntryDTO parent, ChangeLogComponentEntryDTO dto) {
 		component = dto.getEntryName();
+		componentUuid = dto.getItemId();
 		lastChangeSetReached = false;
 	}
 }

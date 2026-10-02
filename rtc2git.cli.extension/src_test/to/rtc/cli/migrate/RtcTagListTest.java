@@ -9,9 +9,12 @@ package to.rtc.cli.migrate;
 import static org.hamcrest.CoreMatchers.equalTo;
 import static org.hamcrest.CoreMatchers.is;
 import static org.hamcrest.CoreMatchers.not;
+import static org.hamcrest.CoreMatchers.sameInstance;
 import static org.hamcrest.CoreMatchers.startsWith;
 import static org.hamcrest.MatcherAssert.assertThat;
 
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Date;
 import java.util.Iterator;
 import java.util.regex.Pattern;
@@ -165,6 +168,39 @@ public class RtcTagListTest {
 				"Expect tag with name 'excludedTag' is not in the list",
 				tagList.contains(new RtcTag("uuid").setOriginalName("excludedTag").setCreationDate(
 						Long.MAX_VALUE - 10000)), equalTo(false));
+	}
+
+	@Test
+	public void testBaselinesOfSeveralComponentsFormOneTag() {
+		RtcTag first = tagList.add(new RtcTag("baseline-a").setOriginalName("R1").setCreationDate(TODAY));
+		RtcTag second = tagList.add(new RtcTag("baseline-b").setOriginalName("R1").setCreationDate(TODAY + 60000));
+
+		assertThat("same tag object is returned", second, sameInstance(first));
+		assertThat(tagList.size(), equalTo(1));
+		assertThat(new ArrayList<String>(first.getBaselineUuids()), equalTo(Arrays.asList("baseline-a", "baseline-b")));
+		// lookup by UUID works even when the date is far off
+		assertThat(tagList.getTag("baseline-b", "R1", 0), sameInstance(first));
+	}
+
+	@Test
+	public void testTagsAreNotEqualByValue() {
+		RtcTag tag1 = new RtcTag("uuid").setOriginalName("same").setCreationDate(TODAY);
+		RtcTag tag2 = new RtcTag("uuid").setOriginalName("same").setCreationDate(TODAY);
+
+		assertThat(tag1.equals(tag2), is(false));
+		assertThat(tag1.matches(tag2.getOriginalName(), tag2.getCreationDate()), is(true));
+	}
+
+	@Test
+	public void testPruneExcludedTagsKeepsBaselinesOfMergedTags() {
+		tagList.add(new RtcTag("excluded-uuid").setOriginalName("excluded").setCreationDate(YESTERDAY));
+		tagList.add(new RtcTag("included-uuid").setOriginalName("included").setCreationDate(TODAY));
+
+		tagList.pruneExcludedTags(Pattern.compile("^included$"));
+
+		RtcTag tag = tagList.iterator().next();
+		assertThat(tagList.size(), equalTo(1));
+		assertThat(new ArrayList<String>(tag.getBaselineUuids()), equalTo(Arrays.asList("excluded-uuid", "included-uuid")));
 	}
 
 	@Test
