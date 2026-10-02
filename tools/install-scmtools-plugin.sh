@@ -6,7 +6,8 @@
 #   [bundle-jar]    defaults to rtc2git.cli.extension/target/to.rtc.cli.migrate-*.jar (run ./mvnw verify first)
 #
 # EWM 7.x SCM Tools start bundles through simpleconfigurator, which ignores dropins/, so the bundle is
-# copied into eclipse/plugins and registered in bundles.info. Older registrations of the bundle are removed.
+# copied into eclipse/plugins and registered in bundles.info. Older registrations of the bundle are removed and
+# the OSGi framework cache is cleared so an upgrade takes effect.
 set -eu
 
 SCMTOOLS=${1:?usage: $0 <scmtools-dir> [bundle-jar]}
@@ -32,6 +33,8 @@ grep -v "^$BSN," "$BUNDLES_INFO" > "$BUNDLES_INFO.tmp" || true
 echo "$BSN,$VERSION,$TARGET,4,false" >> "$BUNDLES_INFO.tmp"
 cp "$JAR" "$ECLIPSE/$TARGET"
 mv "$BUNDLES_INFO.tmp" "$BUNDLES_INFO"
+# the framework cache keeps the previous bundle's wiring after an upgrade; it is rebuilt on the next start
+rm -rf "$ECLIPSE/configuration/org.eclipse.osgi"
 
 echo "Installed $BSN $VERSION into $ECLIPSE"
 echo "Check with: $ECLIPSE/scm help migrate-to-git"
