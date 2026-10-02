@@ -11,6 +11,10 @@ import java.util.regex.Pattern;
 import org.eclipse.core.runtime.IProgressMonitor;
 import org.eclipse.core.runtime.NullProgressMonitor;
 
+import to.rtc.cli.migrate.command.CliRtcCommands;
+import to.rtc.cli.migrate.command.RtcCommands;
+import to.rtc.cli.migrate.command.RtcConnection;
+
 import com.ibm.team.filesystem.cli.client.AbstractSubcommand;
 import com.ibm.team.filesystem.cli.core.internal.ScmCommandLineArgument;
 import com.ibm.team.filesystem.cli.core.subcommands.CommonOptions;
@@ -67,6 +71,13 @@ public abstract class MigrateTo extends AbstractSubcommand implements ISubcomman
 
 	public abstract Pattern getBaselineIncludePattern();
 
+	/**
+	 * @return whether a gap is resolved by accepting the missing change sets together with the requested one
+	 */
+	protected boolean isAcceptMissingChangeSets() {
+		return false;
+	}
+
 	@Override
 	public void run() throws FileSystemException {
 		boolean isUpdateMigration = false;
@@ -77,6 +88,8 @@ public abstract class MigrateTo extends AbstractSubcommand implements ISubcomman
 		try {
 			// Consume the command-line
 			ICommandLine subargs = config.getSubcommandCommandLine();
+			// before any sub-command replaces the command line of the shared configuration
+			RtcConnection connection = RtcConnection.from(config);
 
 			int timeout = 900;
 			if (subargs.hasOption(MigrateToOptions.OPT_RTC_CONNECTION_TIMEOUT)) {
@@ -150,8 +163,10 @@ public abstract class MigrateTo extends AbstractSubcommand implements ISubcomman
 					destinationWs.getItemId().getUuidValue(), new PathLocation(sandboxDirectory.getAbsolutePath()),
 					client, config);
 
-			RtcMigrator rtcMigrator = new RtcMigrator(output, config, destinationWsOption.getStringValue(), migrator,
-					sandboxDirectory, destinationWsComponents.values(), isUpdateMigration);
+			RtcCommands commands = new CliRtcCommands(config, output, connection,
+					destinationWsOption.getStringValue());
+			RtcMigrator rtcMigrator = new RtcMigrator(output, commands, migrator, sandboxDirectory,
+					destinationWsComponents.keySet(), isAcceptMissingChangeSets());
 			boolean isFirstTag = true;
 			int numberOfTags = tagList.size();
 			int tagCounter = 0;
@@ -191,7 +206,8 @@ public abstract class MigrateTo extends AbstractSubcommand implements ISubcomman
 			subargs.setAccessible(true);
 			subargs.set(config.getContext(), new LoggingPrintStream(config.getContext().stdout()));
 		} catch (Exception e) {
-			throw new RuntimeException(e);
+			// only adds time stamps to the output; the migration works without it
+			config.getContext().stdout().println("WARNING: output without time stamps (" + e + ")");
 		}
 	}
 

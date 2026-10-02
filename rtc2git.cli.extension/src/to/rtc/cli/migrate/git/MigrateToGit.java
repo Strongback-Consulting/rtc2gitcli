@@ -15,10 +15,11 @@ import com.ibm.team.rtc.cli.infrastructure.internal.parser.ICommandLine;
 public class MigrateToGit extends MigrateTo {
 	private Migrator migratorImplementation;
 	private Pattern baselineIncludeRegexPattern;
+	private Properties migrationProperties;
 
 	@Override
 	public void run() throws FileSystemException {
-		Properties migrationProperties = readProperties(config.getSubcommandCommandLine());
+		migrationProperties = readProperties(config.getSubcommandCommandLine());
 		baselineIncludeRegexPattern = Pattern.compile(migrationProperties.getProperty("rtc.baseline.include", ""));
 		migratorImplementation = new GitMigrator(migrationProperties);
 		try {
@@ -36,6 +37,11 @@ public class MigrateToGit extends MigrateTo {
 	@Override
 	public Pattern getBaselineIncludePattern() {
 		return baselineIncludeRegexPattern;
+	}
+
+	@Override
+	protected boolean isAcceptMissingChangeSets() {
+		return Boolean.parseBoolean(migrationProperties.getProperty("rtc.accept.missing.changesets", "false"));
 	}
 
 	private Properties readProperties(ICommandLine subargs) {

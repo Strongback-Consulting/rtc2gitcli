@@ -8,36 +8,42 @@ import java.util.List;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
 
-import to.rtc.cli.migrate.command.AcceptCommandDelegate;
-import to.rtc.cli.migrate.command.LoadCommandDelegate;
+import to.rtc.cli.migrate.command.RtcCommands;
 import to.rtc.cli.migrate.util.Files;
 
 import com.ibm.team.filesystem.cli.core.Constants;
-import com.ibm.team.filesystem.cli.core.subcommands.IScmClientConfiguration;
 import com.ibm.team.filesystem.rcp.core.internal.changelog.IChangeLogOutput;
 import com.ibm.team.rtc.cli.infrastructure.internal.core.CLIClientException;
 
+/**
+ * Replays change sets into the sandbox (accept, load) and hands each one to the {@link Migrator} for committing.
+ */
+@SuppressWarnings("restriction")
 public class RtcMigrator {
 
-	/**
-    *
-    */
 	private static final int ACCEPTS_BEFORE_LOCAL_HISTORY_CLEAN = 1000;
 	protected final IChangeLogOutput output;
-	private final IScmClientConfiguration config;
-	private final String workspace;
+	private final RtcCommands commands;
 	private final Migrator migrator;
 	private final Set<String> initiallyLoadedComponents;
+	private final boolean acceptMissingChangeSets;
 	private File sandboxDirectory;
 
-	public RtcMigrator(IChangeLogOutput output, IScmClientConfiguration config, String workspace, Migrator migrator,
-			File sandboxDirectory, Collection<String> initiallyLoadedComponents, boolean isUpdateMigration) {
+	/**
+	 * @param initiallyLoadedComponents
+	 *            UUIDs of the components already loaded in the sandbox
+	 * @param acceptMissingChangeSets
+	 *            on a gap, accept the missing change sets together with the requested one (they end up in a single
+	 *            commit); otherwise a gap stops the migration
+	 */
+	public RtcMigrator(IChangeLogOutput output, RtcCommands commands, Migrator migrator, File sandboxDirectory,
+			Collection<String> initiallyLoadedComponents, boolean acceptMissingChangeSets) {
 		this.output = output;
-		this.config = config;
-		this.workspace = workspace;
+		this.commands = commands;
 		this.migrator = migrator;
 		this.sandboxDirectory = sandboxDirectory;
 		this.initiallyLoadedComponents = new HashSet<String>(initiallyLoadedComponents);
+		this.acceptMissingChangeSets = acceptMissingChangeSets;
 	}
 
 	public void migrateTag(RtcTag tag) throws CLIClientException {
@@ -48,7 +54,12 @@ public class RtcMigrator {
 		for (RtcChangeSet changeSet : changeSets) {
 			try {
 				long acceptDuration = accept(changeSet);
-				long commitDuration = commit(changeSet);
+				long commitDuration = 0;
+				if (migrator.isMigrated(changeSet.getUuid())) {
+					output.writeLine("Change set [" + changeSet.getUuid() + "] was already migrated, no new commit");
+				} else {
+					commitDuration = commit(changeSet);
+				}
 				changeSetCounter++;
 				output.writeLine("Migrated [" + tagName + "] [" + changeSetCounter + "]/[" + numberOfChangesets
 						+ "] changesets. Accept took " + acceptDuration + "ms commit took " + commitDuration + "ms");
@@ -86,16 +97,14 @@ public class RtcMigrator {
 	long commit(RtcChangeSet changeSet) {
 		long startCommit = System.currentTimeMillis();
 		migrator.commitChanges(changeSet);
-		long commitDuration = System.currentTimeMillis() - startCommit;
-		return commitDuration;
+		return System.currentTimeMillis() - startCommit;
 	}
 
 	long accept(RtcChangeSet changeSet) throws CLIClientException {
 		long startAccept = System.currentTimeMillis();
 		acceptAndLoadChangeSet(changeSet);
 		handleInitialLoad(changeSet);
-		long acceptDuration = System.currentTimeMillis() - startAccept;
-		return acceptDuration;
+		return System.currentTimeMillis() - startAccept;
 	}
 
 	private void cleanLocalHistory() {
@@ -111,34 +120,45 @@ public class RtcMigrator {
 
 	private void acceptAndLoadChangeSet(RtcChangeSet changeSet) throws CLIClientException {
 		output.setIndent(2);
-		int result = new AcceptCommandDelegate(config, output, workspace, changeSet.getUuid(), false, false).run();
-		switch (result) {
-		case Constants.STATUS_OUT_OF_SYNC:
-			output.writeLine("Try loading of workspace again with force option");
-			result = new LoadCommandDelegate(config, output, workspace, null, true).run();
-			break;
-		case Constants.STATUS_GAP:
-			output.writeLine("Retry accepting with --accept-missing-changesets");
-			result = new AcceptCommandDelegate(config, output, workspace, changeSet.getUuid(), false, true).run();
-			if (Constants.STATUS_GAP == result || Constants.STATUS_OUT_OF_SYNC == result) {
-				throw new CLIClientException("There was a PROBLEM in accepting that we cannot solve.");
+		String uuid = changeSet.getUuid();
+		int result = commands.accept(uuid, false);
+		if (result == Constants.STATUS_OUT_OF_SYNC) {
+			output.writeLine("Sandbox out of sync, loading the workspace again with --force");
+			requireSuccess("load --force", commands.load(null, true));
+			result = commands.accept(uuid, false);
+		}
+		if (result == Constants.STATUS_GAP) {
+			if (!acceptMissingChangeSets) {
+				throw new CLIClientException("Accepting change set [" + uuid
+						+ "] requires earlier change sets that are not accepted yet (gap). Set"
+						+ " rtc.accept.missing.changesets=true to accept them together with this change set;"
+						+ " they are then committed as a single commit.");
 			}
-			break;
-		default:
-			break;
+			output.writeLine("WARNING: gap in change set [" + uuid
+					+ "]; accepting the missing change sets into the same commit");
+			result = commands.accept(uuid, true);
+		}
+		if (result != Constants.STATUS_WORKSPACE_UNCHANGED) {
+			requireSuccess("accept " + uuid, result);
 		}
 	}
 
-	private void handleInitialLoad(RtcChangeSet changeSet) {
-		if (!initiallyLoadedComponents.contains(changeSet.getComponent())) {
-			try {
-				new LoadCommandDelegate(config, output, workspace, changeSet.getComponent(), false).run();
-				initiallyLoadedComponents.add(changeSet.getComponent());
-			} catch (CLIClientException e) {
-				throw new RuntimeException("Not a valid sandbox. Please run [scm load " + workspace
-						+ "] before [scm migrate-to-git] command");
+	private void handleInitialLoad(RtcChangeSet changeSet) throws CLIClientException {
+		String component = changeSet.getComponentKey();
+		if (!initiallyLoadedComponents.contains(component)) {
+			int result = commands.load(component, false);
+			if (result != Constants.STATUS_OK.intValue()) {
+				throw new CLIClientException("Loading component [" + changeSet.getComponent()
+						+ "] failed with status [" + result + "]. Is the sandbox valid? Run [scm load] of the target"
+						+ " workspace before [scm migrate-to-git].");
 			}
+			initiallyLoadedComponents.add(component);
 		}
 	}
 
+	private static void requireSuccess(String operation, int result) throws CLIClientException {
+		if (result != Constants.STATUS_OK.intValue()) {
+			throw new CLIClientException("[" + operation + "] failed with status [" + result + "]");
+		}
+	}
 }
