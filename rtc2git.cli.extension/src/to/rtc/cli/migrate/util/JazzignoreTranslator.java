@@ -2,14 +2,14 @@ package to.rtc.cli.migrate.util;
 
 import java.io.File;
 import java.io.IOException;
-import java.lang.reflect.Method;
 import java.nio.charset.Charset;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-import org.eclipse.jgit.ignore.internal.Strings;
+import org.eclipse.jgit.errors.InvalidPatternException;
+import org.eclipse.jgit.fnmatch.FileNameMatcher;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -19,7 +19,6 @@ import org.slf4j.LoggerFactory;
 public class JazzignoreTranslator {
 	private static final Logger LOGGER = LoggerFactory.getLogger(JazzignoreTranslator.class);
 	private static final Pattern EXCLUSION = Pattern.compile("\\{(.*?)\\}");
-	private static final Method CONVERT_GLOB_METHOD = initConvertGlobMethod();
 
 	/**
 	 * Translates a .jazzignore file to .gitignore
@@ -57,17 +56,6 @@ public class JazzignoreTranslator {
 		return gitignoreLines;
 	}
 
-	private static Method initConvertGlobMethod() {
-		try {
-			Method method = Strings.class.getDeclaredMethod("convertGlob", String.class);
-			method.setAccessible(true);
-			return method;
-		} catch (Exception e) {
-			LOGGER.error("Unable to access needed method", e);
-			return null;
-		}
-	}
-
 	private static List<String> addGroupsToList(String lineToMatch, List<String> ignoreLines) {
 		boolean recursive = lineToMatch.startsWith("core.ignore.recursive");
 		Matcher matcher = EXCLUSION.matcher(lineToMatch);
@@ -80,15 +68,25 @@ public class JazzignoreTranslator {
 		return ignoreLines;
 	}
 
-	private static boolean checkPattern(String pattern) {
-		if (CONVERT_GLOB_METHOD != null) {
-			try {
-				CONVERT_GLOB_METHOD.invoke(null, pattern);
-			} catch (Exception e) {
-				LOGGER.warn("Ignoring uncompilable pattern: {}", pattern);
-				return false;
+	static boolean checkPattern(String pattern) {
+		try {
+			if (endsWithEscape(pattern)) {
+				throw new InvalidPatternException("Trailing escape character", pattern);
 			}
+			new FileNameMatcher(pattern, null);
+			return true;
+		} catch (InvalidPatternException e) {
+			LOGGER.warn("Ignoring uncompilable pattern: {}", pattern);
+			return false;
 		}
-		return true;
+	}
+
+	// git treats a pattern ending in an unescaped backslash as invalid
+	private static boolean endsWithEscape(String pattern) {
+		int backslashes = 0;
+		for (int i = pattern.length() - 1; i >= 0 && pattern.charAt(i) == '\\'; i--) {
+			backslashes++;
+		}
+		return backslashes % 2 == 1;
 	}
 }

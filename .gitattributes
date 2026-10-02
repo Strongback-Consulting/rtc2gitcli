@@ -7,3 +7,4 @@
 *.java text
 *.properties text
 *.launch text
+*.cmd text eol=crlf

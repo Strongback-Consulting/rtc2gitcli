@@ -16,14 +16,32 @@ scm migrate-to-git -r <uri> -u <username> -P <password> -m <migration.properties
 
 ## Build and test
 
-All code lives in `rtc2git.cli.extension/` (sources in `src/`, tests in `src_test/`; Maven outputs to `bin/` and `bin_test/`, and copies runtime deps into `lib/`).
+Java code lives in `rtc2git.cli.extension/` (sources in `src/`, tests in `src_test/`). It is built with **Tycho 4** through the Maven wrapper at the repo root. The `com.ibm.team.*` dependencies are not on Maven Central. They come from a local **EWM 7.2 SCM Tools** install, which `ewm-7.2.target` uses as the target platform:
 
-- Most of `src/` imports `com.ibm.team.*` classes that are **not available from Maven**. They come from IBM's SCM Tools installation configured as an Eclipse PDE target platform (`rtc2git.target`, see the wiki "configure-target-platform"). A plain `mvn compile`/`mvn test` without that target platform will fail to compile those classes.
-- The intended dev workflow is Eclipse: import as a Maven project with the SCM Tools target platform active, then run the `launch/rtc2git.launch` configuration (prints "Help for: scm migrate-to-git" by default; edit program arguments to run a real migration). RTC 6+ needs the workaround in https://github.com/rtcTo/rtc2gitcli/issues/44#issuecomment-396727582.
-- Tests are JUnit 4. `pom.xml` declares only JGit and JUnit; `mvn dependency:copy-dependencies` (bound to `process-sources`) populates `lib/`, which `META-INF/MANIFEST.MF`'s `Bundle-ClassPath` references — keep the jar names in the manifest in sync when bumping dependency versions.
-- Run a single test (only works where the IBM classes resolve): `mvn -f rtc2git.cli.extension/pom.xml test -Dtest=GitMigratorTest#testName`, or run it from Eclipse.
-- Code targets Java 1.6 source/target (`maven.compiler.source/target`, `Bundle-RequiredExecutionEnvironment: JavaSE-1.6`) — avoid lambdas, diamond operator, try-with-resources, etc.
+```bash
+export SCMTOOLS_HOME=/path/to/jazz/scmtools          # folder containing eclipse/plugins
+./mvnw verify                                         # compile, run all JUnit tests, package the bundle
+./mvnw verify -pl rtc2git.cli.extension -Dtest=GitMigratorTest#testCommitChanges -Dsurefire.failIfNoSpecifiedTests=false
+```
+
+- Java 17 (`maven.compiler.release`, `Bundle-RequiredExecutionEnvironment: JavaSE-17`); the 7.2 `scm` runtime is Java 17.
+- JGit and its dependencies are embedded as private inner jars. The `initialize` phase copies runtime deps, version-stripped, into `lib/`. `META-INF/MANIFEST.MF` `Bundle-ClassPath` and `build.properties` `bin.includes` must list the same `lib/*.jar` names; update all three when a dependency changes.
+- Tests are JUnit 4, run by `maven-surefire-plugin` outside OSGi. Tests that load IBM CLI classes need the SCM Tools target platform, so every test run needs `SCMTOOLS_HOME`.
+- Eclipse workflow: import as a Maven project with `ewm-7.2.target` as the active target platform, and run `launch/rtc2git.launch`. Its plugin list is stale (RTC 4.x era) and needs regenerating in Eclipse.
 - Formatting: Eclipse formatter profile `eclipse-rtccli-format-settings.xml` (tabs for indentation).
+
+### ewm2zbuilder (Python)
+
+`ewm2zbuilder/` converts an EWM system definition export (XML from the Build System Toolkit's Ant `ld:` tasks) into DBB zBuilder YAML. It is a separate Python 3.11+ project managed with `uv`:
+
+```bash
+cd ewm2zbuilder
+uv run --group dev pytest -q                                   # all tests
+uv run --group dev pytest -q tests/test_convert.py::test_emit_step_shape
+uv run ewm2zbuilder <export.xml> -o out --schema <schema.json> [--sources-map map.yaml]
+```
+
+Neither the IBM zBuilder schema nor any client export is committed. Tests find them through `EWM2ZBUILDER_SCHEMA` and `EWM2ZBUILDER_EXPORT`, or in the git-ignored `ewm2zbuilder/schema/` and `ewm2zbuilder/local/` folders, and skip when they are absent. This repo is public: never commit client system definitions, data set names, or generated output.
 
 ## Architecture
 

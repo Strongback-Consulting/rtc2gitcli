@@ -1,6 +1,8 @@
 package to.rtc.cli.migrate.util;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertTrue;
 
 import java.io.File;
 import java.io.IOException;
@@ -23,6 +25,14 @@ public class JazzignoreTranslatorTest {
 		Files.writeLines(jazzignore, getJazzignoreLines(), Charset.defaultCharset(), false);
 		List<String> gitignoreLines = JazzignoreTranslator.toGitignore(jazzignore);
 		assertEquals(getExpectedGitignoreLines(), gitignoreLines);
+	}
+
+	@Test
+	public void testCheckPattern() {
+		assertTrue(JazzignoreTranslator.checkPattern("/a?c"));
+		assertTrue(JazzignoreTranslator.checkPattern("/a\\\\"));
+		assertFalse(JazzignoreTranslator.checkPattern("/a\\"));
+		assertFalse(JazzignoreTranslator.checkPattern("/[abc"));
 	}
 
 	private List<String> getJazzignoreLines() {
