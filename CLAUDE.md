@@ -27,6 +27,7 @@ export SCMTOOLS_HOME=/path/to/jazz/scmtools          # folder containing eclipse
 - Java 17 (`maven.compiler.release`, `Bundle-RequiredExecutionEnvironment: JavaSE-17`); the 7.2 `scm` runtime is Java 17.
 - JGit and its dependencies are embedded as private inner jars. The `initialize` phase copies runtime deps, version-stripped, into `lib/`. `META-INF/MANIFEST.MF` `Bundle-ClassPath` and `build.properties` `bin.includes` must list the same `lib/*.jar` names; update all three when a dependency changes.
 - Tests are JUnit 4, run by `maven-surefire-plugin` outside OSGi. Tests that load IBM CLI classes need the SCM Tools target platform, so every test run needs `SCMTOOLS_HOME`.
+- Install into an SCM Tools copy with `tools/install-scmtools-plugin.sh <scmtools-dir>`. EWM 7.x starts bundles through `simpleconfigurator`, so the script registers the jar in `bundles.info`; `dropins/` is ignored. Check the install with `scm help migrate-to-git`. On Apple silicon without Rosetta, the bundled x86_64 JRE won't start. Run the launcher jar from `eclipse/scm` with a local Java 17+ instead.
 - Eclipse workflow: import as a Maven project with `ewm-7.2.target` as the active target platform, and run `launch/rtc2git.launch`. Its plugin list is stale (RTC 4.x era) and needs regenerating in Eclipse.
 - Formatting: Eclipse formatter profile `eclipse-rtccli-format-settings.xml` (tabs for indentation).
 
