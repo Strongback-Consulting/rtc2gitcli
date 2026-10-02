@@ -24,6 +24,7 @@ export SCMTOOLS_HOME=/path/to/jazz/scmtools          # folder containing eclipse
 ./mvnw verify -pl rtc2git.cli.extension -Dtest=GitMigratorTest#testCommitChanges -Dsurefire.failIfNoSpecifiedTests=false
 ```
 
+- Tycho's incremental compile sometimes keeps stale test classes after signature changes. These show up as `IncompatibleClassChangeError` or as unresolved methods in tests. Run `./mvnw clean verify` when that happens.
 - Java 17 (`maven.compiler.release`, `Bundle-RequiredExecutionEnvironment: JavaSE-17`); the 7.2 `scm` runtime is Java 17.
 - JGit and its dependencies are embedded as private inner jars. The `initialize` phase copies runtime deps, version-stripped, into `lib/`. `META-INF/MANIFEST.MF` `Bundle-ClassPath` and `build.properties` `bin.includes` must list the same `lib/*.jar` names; update all three when a dependency changes.
 - Tests are JUnit 4, run by `maven-surefire-plugin` outside OSGi. Tests that load IBM CLI classes need the SCM Tools target platform, so every test run needs `SCMTOOLS_HOME`.

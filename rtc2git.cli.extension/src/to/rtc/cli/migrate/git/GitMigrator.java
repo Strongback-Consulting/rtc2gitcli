@@ -26,6 +26,7 @@ import org.eclipse.jgit.api.Git;
 import org.eclipse.jgit.api.RmCommand;
 import org.eclipse.jgit.api.Status;
 import org.eclipse.jgit.api.errors.GitAPIException;
+import org.eclipse.jgit.ignore.FastIgnoreRule;
 import org.eclipse.jgit.lib.Config;
 import org.eclipse.jgit.lib.Constants;
 import org.eclipse.jgit.lib.ObjectId;
@@ -72,6 +73,8 @@ public final class GitMigrator implements Migrator {
 	private IdentityResolver identities;
 	private boolean commitEmptyChangeSets;
 	private boolean changeSetTrailer;
+	private boolean forceAddIgnored;
+	private List<FastIgnoreRule> intentionalIgnores;
 	private final Set<String> migratedChangeSets;
 
 	public GitMigrator(Properties properties) {
@@ -228,6 +231,7 @@ public final class GitMigrator implements Migrator {
 			Status status = git.status().call();
 
 			Set<String> toAdd = handleAdded(status);
+			Set<String> toForce = handleIgnoredButVersioned(status);
 			Set<String> toRestore = new HashSet<String>();
 			Set<String> toRemove = handleRemoved(status, toRestore);
 
@@ -235,6 +239,14 @@ public final class GitMigrator implements Migrator {
 			if (!toAdd.isEmpty()) {
 				AddCommand add = git.add();
 				for (String filepattern : toAdd) {
+					add.addFilepattern(filepattern);
+				}
+				add.call();
+			}
+			if (!toForce.isEmpty()) {
+				AddCommand add = git.add()
+						.setWorkingTreeIterator(new ForceAddTreeIterator(git.getRepository(), toForce));
+				for (String filepattern : toForce) {
 					add.addFilepattern(filepattern);
 				}
 				add.call();
@@ -255,7 +267,7 @@ public final class GitMigrator implements Migrator {
 			}
 
 			// execute commit if something has changed, or to keep one commit per change set
-			if (!toAdd.isEmpty() || !toRemove.isEmpty() || allowEmpty) {
+			if (!toAdd.isEmpty() || !toForce.isEmpty() || !toRemove.isEmpty() || allowEmpty) {
 				git.commit().setMessage(comment).setAuthor(ident).setCommitter(ident).setAllowEmpty(true).call();
 			}
 
@@ -296,6 +308,53 @@ public final class GitMigrator implements Migrator {
 		}
 		handleJazzignores(toRemove);
 		return toRemove;
+	}
+
+	/**
+	 * Only scm writes to the sandbox during a migration, so an ignored file that is present but not tracked came from
+	 * EWM, where it is versioned; it is added anyway. Exceptions are the scm metadata and what the migration
+	 * properties exclude on purpose (<code>global.gitignore.entries</code>, <code>ignore.file.extensions</code>).
+	 */
+	Set<String> handleIgnoredButVersioned(Status status) {
+		Set<String> toForce = new TreeSet<String>();
+		if (!forceAddIgnored) {
+			return toForce;
+		}
+		for (String ignored : status.getIgnoredNotInIndex()) {
+			if (!isIntentionallyIgnored(ignored)) {
+				toForce.add(ignored);
+			}
+		}
+		return toForce;
+	}
+
+	boolean isIntentionallyIgnored(String path) {
+		if (intentionalIgnores == null) {
+			Set<String> patterns = new LinkedHashSet<String>(ROOT_IGNORED_ENTRIES);
+			parseElements(properties.getProperty("global.gitignore.entries", ""), patterns);
+			for (String extension : getIgnoredFileExtensions()) {
+				patterns.add("*" + extension);
+			}
+			intentionalIgnores = new ArrayList<FastIgnoreRule>();
+			for (String pattern : patterns) {
+				intentionalIgnores.add(new FastIgnoreRule(pattern));
+			}
+		}
+		// a path is excluded when it or one of its parent folders matches
+		for (String candidate = path; candidate != null; candidate = parent(candidate)) {
+			boolean directory = !candidate.equals(path) || new File(rootDir, candidate).isDirectory();
+			for (FastIgnoreRule rule : intentionalIgnores) {
+				if (rule.isMatch(candidate, directory) && rule.getResult()) {
+					return true;
+				}
+			}
+		}
+		return false;
+	}
+
+	private static String parent(String path) {
+		int slash = path.lastIndexOf('/');
+		return slash < 0 ? null : path.substring(0, slash);
 	}
 
 	private Set<String> handleAdded(Status status) {
@@ -404,6 +463,8 @@ public final class GitMigrator implements Migrator {
 		identities = new IdentityResolver(props, defaultIdent, defaultCharset);
 		commitEmptyChangeSets = Boolean.parseBoolean(props.getProperty("commit.empty.changesets", "true"));
 		changeSetTrailer = Boolean.parseBoolean(props.getProperty("commit.changeset.trailer", "true"));
+		forceAddIgnored = Boolean.parseBoolean(props.getProperty("commit.force.add.ignored", "true"));
+		intentionalIgnores = null;
 		parseElements(props.getProperty("ignore.file.extensions", ""), ignoredFileExtensions);
 		// update window cache config
 		WindowCacheConfig cfg = getWindowCacheConfig();
