@@ -28,11 +28,7 @@ public class LoggingPrintStream extends PrintStream {
 	}
 
 	boolean endsWithNewLine(byte[] bytes, int offset, int length) {
-		int position = bytes.length - 1;
-		if (position > (offset + length)) {
-			position = offset + length;
-		}
-		return NEWLINE == bytes[position];
+		return length > 0 && NEWLINE == bytes[offset + length - 1];
 	}
 
 	@Override

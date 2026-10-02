@@ -29,4 +29,15 @@ public interface Migrator {
 
 	boolean needsIntermediateCleanup();
 
+	/**
+	 * Tells whether the change set was already migrated by an earlier run.
+	 *
+	 * @param changeSetUuid
+	 *            the EWM change set UUID
+	 * @return <code>true</code> if a commit for that change set exists
+	 */
+	default boolean isMigrated(String changeSetUuid) {
+		return false;
+	}
+
 }

@@ -132,7 +132,8 @@ public class GitMigratorTest {
 		assertFalse(config.getBoolean("core", null, "ignorecase", true));
 		assertEquals(File.separatorChar == '/' ? "input" : "true", config.getString("core", null, "autocrlf"));
 		assertEquals("simple", config.getString("push", null, "default"));
-		assertFalse(config.getBoolean("http", null, "sslverify", true));
+		// TLS verification is left at git's default
+		assertNull(config.getString("http", null, "sslverify"));
 	}
 
 	@Test
@@ -367,7 +368,7 @@ public class GitMigratorTest {
 
 	@Test
 	public void testCreateTagNameReplacesWhiteSpacesWithUnderscore() {
-		String tagname = migrator.createTagName("tag with whitespaces");
+		String tagname = GitMigrator.createTagName("tag with whitespaces");
 
 		assertThat(tagname, is("tag_with_whitespaces"));
 	}

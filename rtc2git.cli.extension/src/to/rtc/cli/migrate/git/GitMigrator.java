@@ -3,6 +3,7 @@ package to.rtc.cli.migrate.git;
 import java.io.File;
 import java.io.IOException;
 import java.nio.charset.Charset;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
@@ -26,8 +27,13 @@ import org.eclipse.jgit.api.RmCommand;
 import org.eclipse.jgit.api.Status;
 import org.eclipse.jgit.api.errors.GitAPIException;
 import org.eclipse.jgit.lib.Config;
+import org.eclipse.jgit.lib.Constants;
+import org.eclipse.jgit.lib.ObjectId;
 import org.eclipse.jgit.lib.PersonIdent;
+import org.eclipse.jgit.lib.Ref;
+import org.eclipse.jgit.lib.Repository;
 import org.eclipse.jgit.lib.StoredConfig;
+import org.eclipse.jgit.revwalk.RevCommit;
 import org.eclipse.jgit.storage.file.WindowCacheConfig;
 
 import to.rtc.cli.migrate.ChangeSet;
@@ -49,9 +55,11 @@ public final class GitMigrator implements Migrator {
 	static final List<String> ROOT_IGNORED_ENTRIES = Arrays.asList("/.jazz5", "/.jazzShed", "/.metadata");
 	static final Pattern GITIGNORE_PATTERN = Pattern.compile("(^.*(/|))\\.gitignore$");
 	static final Pattern JAZZIGNORE_PATTERN = Pattern.compile("(^.*(/|))\\.jazzignore$");
+	static final String CHANGE_SET_TRAILER = "EWM-ChangeSet";
+	static final String BASELINE_TRAILER = "EWM-Baseline";
 	static final Pattern VALUE_PATTERN = Pattern.compile("^([0-9]+) *(m|mb|k|kb|)$", Pattern.CASE_INSENSITIVE);
 
-	private final Charset defaultCharset;
+	private Charset defaultCharset;
 	private final Set<String> ignoredFileExtensions;
 	private final WindowCacheConfig WindowCacheConfig;
 
@@ -61,12 +69,16 @@ public final class GitMigrator implements Migrator {
 	private PersonIdent defaultIdent;
 	private File rootDir;
 	private CommitCommentTranslator commentTranslator;
+	private IdentityResolver identities;
+	private boolean commitEmptyChangeSets;
+	private boolean changeSetTrailer;
+	private final Set<String> migratedChangeSets;
 
 	public GitMigrator(Properties properties) {
-		defaultCharset = Charset.forName("UTF-8");
 		ignoredFileExtensions = new HashSet<String>();
 		WindowCacheConfig = new WindowCacheConfig();
 		commitsAfterClean = 0;
+		migratedChangeSets = new HashSet<String>();
 		initialize(properties);
 	}
 
@@ -210,7 +222,7 @@ public final class GitMigrator implements Migrator {
 		}
 	}
 
-	private void gitCommit(PersonIdent ident, String comment) {
+	private void gitCommit(PersonIdent ident, String comment, boolean allowEmpty) {
 		try {
 			// add all untracked files
 			Status status = git.status().call();
@@ -242,9 +254,9 @@ public final class GitMigrator implements Migrator {
 				checkout.call();
 			}
 
-			// execute commit if something has changed
-			if (!toAdd.isEmpty() || !toRemove.isEmpty()) {
-				git.commit().setMessage(comment).setAuthor(ident).setCommitter(ident).call();
+			// execute commit if something has changed, or to keep one commit per change set
+			if (!toAdd.isEmpty() || !toRemove.isEmpty() || allowEmpty) {
+				git.commit().setMessage(comment).setAuthor(ident).setCommitter(ident).setAllowEmpty(true).call();
 			}
 
 			++commitsAfterClean;
@@ -354,7 +366,6 @@ public final class GitMigrator implements Migrator {
 		StoredConfig config = git.getRepository().getConfig();
 		config.setBoolean("core", null, "ignoreCase", false);
 		config.setString("core", null, "autocrlf", File.separatorChar == '/' ? "input" : "true");
-		config.setBoolean("http", null, "sslverify", false);
 		config.setString("push", null, "default", "simple");
 		fillConfigFromProperties(config);
 		config.save();
@@ -386,9 +397,13 @@ public final class GitMigrator implements Migrator {
 
 	void initialize(Properties props) {
 		properties = props;
+		defaultCharset = Charset.forName(props.getProperty("file.encoding", "UTF-8").trim());
 		commentTranslator = new CommitCommentTranslator(props);
 		defaultIdent = new PersonIdent(props.getProperty("user.name", "RTC 2 git"),
 				props.getProperty("user.email", "rtc2git@rtc.to"));
+		identities = new IdentityResolver(props, defaultIdent, defaultCharset);
+		commitEmptyChangeSets = Boolean.parseBoolean(props.getProperty("commit.empty.changesets", "true"));
+		changeSetTrailer = Boolean.parseBoolean(props.getProperty("commit.changeset.trailer", "true"));
 		parseElements(props.getProperty("ignore.file.extensions", ""), ignoredFileExtensions);
 		// update window cache config
 		WindowCacheConfig cfg = getWindowCacheConfig();
@@ -412,8 +427,34 @@ public final class GitMigrator implements Migrator {
 		return (int) configThreshold;
 	}
 
-	String createTagName(String tagName) {
-		return tagName.replace(' ', '_').replace('[', '_').replace(']', '_');
+	/**
+	 * Turns an EWM baseline name into a valid git tag name.
+	 */
+	static String createTagName(String tagName) {
+		StringBuilder sb = new StringBuilder();
+		for (char c : tagName.trim().toCharArray()) {
+			sb.append(c <= ' ' || c == 0x7f || "~^:?*[]\\".indexOf(c) >= 0 ? '_' : c);
+		}
+		String name = sb.toString().replace("@{", "_{");
+		while (name.contains("..")) {
+			name = name.replace("..", "_.");
+		}
+		while (name.startsWith(".") || name.startsWith("-") || name.startsWith("/")) {
+			name = name.substring(1);
+		}
+		while (name.endsWith(".") || name.endsWith("/")) {
+			name = name.substring(0, name.length() - 1);
+		}
+		if (name.endsWith(".lock")) {
+			name = name + "_";
+		}
+		if (!Repository.isValidRefName(Constants.R_TAGS + name)) {
+			name = name.replace('/', '_');
+		}
+		if (name.isEmpty() || !Repository.isValidRefName(Constants.R_TAGS + name)) {
+			name = "tag_" + Integer.toHexString(tagName.hashCode());
+		}
+		return name;
 	}
 
 	@Override
@@ -423,6 +464,7 @@ public final class GitMigrator implements Migrator {
 			File bareGitDirectory = new File(sandboxRootDirectory, ".git");
 			if (bareGitDirectory.exists()) {
 				git = Git.open(sandboxRootDirectory);
+				checkResumable();
 			} else if (sandboxRootDirectory.exists()) {
 				git = Git.init().setDirectory(sandboxRootDirectory).call();
 			} else {
@@ -432,7 +474,7 @@ public final class GitMigrator implements Migrator {
 			initRootGitignore(sandboxRootDirectory);
 			initRootGitattributes(sandboxRootDirectory);
 			initConfig();
-			gitCommit(new PersonIdent(defaultIdent, System.currentTimeMillis(), 0), "Initial commit");
+			gitCommit(new PersonIdent(defaultIdent, Instant.now(), identities.getZoneId()), "Initial commit", false);
 		} catch (IOException e) {
 			throw new RuntimeException("Unable to initialize GIT repository", e);
 		} catch (GitAPIException e) {
@@ -443,7 +485,11 @@ public final class GitMigrator implements Migrator {
 	@Override
 	public void close() {
 		if (git != null) {
-			runGitGc();
+			try {
+				runGitGc();
+			} finally {
+				git.close();
+			}
 		}
 		SortedSet<String> existingIgnoredFiles = getExistingIgnoredFiles();
 		if (!existingIgnoredFiles.isEmpty()) {
@@ -459,32 +505,89 @@ public final class GitMigrator implements Migrator {
 			git.gc().call();
 		} catch (GitAPIException e) {
 			e.printStackTrace();
-		} finally {
-			git.close();
 		}
 	}
 
 	@Override
 	public void commitChanges(ChangeSet changeset) {
-		gitCommit(
-				new PersonIdent(changeset.getCreatorName(), changeset.getEmailAddress(), changeset.getCreationDate(),
-						0),
-				getCommitMessage(getWorkItemNumbers(changeset.getWorkItems()), getCommentText(changeset),
-						getWorkItemTexts(changeset.getWorkItems())));
+		String message = getCommitMessage(getWorkItemNumbers(changeset.getWorkItems()), getCommentText(changeset),
+				getWorkItemTexts(changeset.getWorkItems()));
+		String uuid = changeset.getUuid();
+		if (changeSetTrailer && uuid != null) {
+			message = message + "\n\n" + CHANGE_SET_TRAILER + ": " + uuid;
+		}
+		gitCommit(identities.resolve(changeset), message, commitEmptyChangeSets && uuid != null);
+		if (uuid != null) {
+			migratedChangeSets.add(uuid);
+		}
+	}
+
+	@Override
+	public boolean isMigrated(String changeSetUuid) {
+		return migratedChangeSets.contains(changeSetUuid);
+	}
+
+	/**
+	 * An existing repository is resumed: its working tree must be clean (otherwise an earlier run stopped between
+	 * accepting a change set and committing it), and the change sets it already contains are remembered.
+	 */
+	private void checkResumable() throws GitAPIException, IOException {
+		if (git.getRepository().resolve(Constants.HEAD) == null) {
+			return;
+		}
+		Status status = git.status().call();
+		if (!status.isClean()) {
+			Set<String> pending = new TreeSet<String>(status.getUncommittedChanges());
+			pending.addAll(status.getUntracked());
+			throw new IllegalStateException("The sandbox " + rootDir + " has uncommitted changes " + pending
+					+ ". A previous migration probably stopped after accepting a change set but before committing it."
+					+ " Commit or discard these changes, then run the migration again.");
+		}
+		for (RevCommit commit : git.log().call()) {
+			migratedChangeSets.addAll(commit.getFooterLines(CHANGE_SET_TRAILER));
+		}
 	}
 
 	@Override
 	public void createTag(Tag tag) {
 		String tagName = tag.getName();
-		if (tagName != null && !tagName.isEmpty()) {
-			try {
-				git.tag().setTagger(defaultIdent).setName(createTagName(tagName)).call();
-			} catch (RuntimeException e) {
-				throw e;
-			} catch (Exception e) {
-				throw new RuntimeException("Unable to tag", e);
-			}
+		if (tagName == null || tagName.isEmpty()) {
+			return;
 		}
+		try {
+			Repository repository = git.getRepository();
+			ObjectId head = repository.resolve(Constants.HEAD);
+			String baseName = createTagName(tagName);
+			String name = baseName;
+			Ref existing;
+			for (int i = 2; (existing = repository.exactRef(Constants.R_TAGS + name)) != null; i++) {
+				if (head != null && head.equals(peeled(repository, existing))) {
+					// re-run of an already tagged baseline
+					return;
+				}
+				name = baseName + "_" + i;
+			}
+			long created = tag.getCreationDate();
+			Instant when = (created <= 0 || created == Long.MAX_VALUE) ? Instant.now() : Instant.ofEpochMilli(created);
+			StringBuilder message = new StringBuilder("EWM baseline: ").append(tag.getOriginalName());
+			if (!tag.getBaselineUuids().isEmpty()) {
+				message.append('\n');
+				for (String uuid : tag.getBaselineUuids()) {
+					message.append('\n').append(BASELINE_TRAILER).append(": ").append(uuid);
+				}
+			}
+			git.tag().setName(name).setAnnotated(true).setMessage(message.toString())
+					.setTagger(new PersonIdent(defaultIdent, when, identities.getZoneId())).call();
+		} catch (RuntimeException e) {
+			throw e;
+		} catch (Exception e) {
+			throw new RuntimeException("Unable to tag", e);
+		}
+	}
+
+	private static ObjectId peeled(Repository repository, Ref ref) throws IOException {
+		Ref peeled = repository.getRefDatabase().peel(ref);
+		return peeled.getPeeledObjectId() != null ? peeled.getPeeledObjectId() : peeled.getObjectId();
 	}
 
 	private void fillConfigFromProperties(Config config) {
