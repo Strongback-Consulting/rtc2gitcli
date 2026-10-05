@@ -52,14 +52,21 @@ public class RtcMigrator {
 		int numberOfChangesets = changeSets.size();
 		String tagName = tag.getName();
 		for (RtcChangeSet changeSet : changeSets) {
+			boolean accepted = false;
+			boolean committed = false;
 			try {
-				long acceptDuration = accept(changeSet);
+				long startAccept = System.currentTimeMillis();
+				acceptAndLoadChangeSet(changeSet);
+				accepted = true;
+				handleInitialLoad(changeSet);
+				long acceptDuration = System.currentTimeMillis() - startAccept;
 				long commitDuration = 0;
 				if (migrator.isMigrated(changeSet.getUuid())) {
 					output.writeLine("Change set [" + changeSet.getUuid() + "] was already migrated, no new commit");
 				} else {
 					commitDuration = commit(changeSet);
 				}
+				committed = true;
 				changeSetCounter++;
 				output.writeLine("Migrated [" + tagName + "] [" + changeSetCounter + "]/[" + numberOfChangesets
 						+ "] changesets. Accept took " + acceptDuration + "ms commit took " + commitDuration + "ms");
@@ -69,7 +76,7 @@ public class RtcMigrator {
 				if (changeSetCounter % ACCEPTS_BEFORE_LOCAL_HISTORY_CLEAN == 0) {
 					cleanLocalHistory();
 				}
-			} catch (CLIClientException clie) {
+			} catch (CLIClientException | RuntimeException failure) {
 				output.writeLine("Changeset details:");
 				output.writeLine("  Tag original name       : " + tag.getOriginalName());
 				output.writeLine("  Tag creation date       : " + new Date(tag.getCreationDate()));
@@ -78,7 +85,14 @@ public class RtcMigrator {
 				output.writeLine("  Changeset creation date : " + new Date(changeSet.getCreationDate()));
 				output.writeLine("  Changeset component     : " + changeSet.getComponent());
 				output.writeLine("  Changeset UUID          : " + changeSet.getUuid());
-				throw clie;
+				if (accepted && !committed) {
+					// a rerun would not see it as incoming any more and it would be missing in git
+					output.writeLine("The change set is accepted in workspace [" + commands.getWorkspace()
+							+ "] but not committed. Before running the migration again, discard it with:");
+					output.writeLine("  scm discard -w \"" + commands.getWorkspace() + "\" " + changeSet.getUuid()
+							+ "   (plus your -r/login options)");
+				}
+				throw failure;
 			}
 		}
 		cleanLocalHistory();
@@ -98,13 +112,6 @@ public class RtcMigrator {
 		long startCommit = System.currentTimeMillis();
 		migrator.commitChanges(changeSet);
 		return System.currentTimeMillis() - startCommit;
-	}
-
-	long accept(RtcChangeSet changeSet) throws CLIClientException {
-		long startAccept = System.currentTimeMillis();
-		acceptAndLoadChangeSet(changeSet);
-		handleInitialLoad(changeSet);
-		return System.currentTimeMillis() - startAccept;
 	}
 
 	private void cleanLocalHistory() {

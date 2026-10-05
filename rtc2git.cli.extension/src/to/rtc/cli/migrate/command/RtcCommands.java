@@ -9,6 +9,11 @@ import com.ibm.team.rtc.cli.infrastructure.internal.core.CLIClientException;
 @SuppressWarnings("restriction")
 public interface RtcCommands {
 
+	/**
+	 * @return the name of the target workspace the commands work on
+	 */
+	String getWorkspace();
+
 	int accept(String changeSetUuid, boolean acceptMissingChangeSets) throws CLIClientException;
 
 	/**

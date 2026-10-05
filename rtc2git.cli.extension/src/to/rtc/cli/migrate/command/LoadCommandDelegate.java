@@ -36,6 +36,9 @@ public class LoadCommandDelegate extends RtcCommandDelegate {
 
 	private static List<String> arguments(String workspace, String component, boolean force) {
 		List<String> args = new ArrayList<String>();
+		// the migration owns the target workspace: load it here even if the server says it was last loaded in
+		// another sandbox (e.g. an earlier migration directory)
+		args.add("--allow");
 		if (force) {
 			args.add("--force");
 		}

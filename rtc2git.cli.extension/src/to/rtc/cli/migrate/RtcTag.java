@@ -4,6 +4,7 @@ import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.LinkedHashSet;
@@ -114,14 +115,33 @@ final class RtcTag implements Tag {
 		List<RtcChangeSet> changeSets = new ArrayList<RtcChangeSet>();
 		Map<String, AtomicInteger> changeSetOrderIndex = new HashMap<String, AtomicInteger>();
 
-		for (String component : components.keySet()) {
-			changeSetOrderIndex.put(component, new AtomicInteger(0));
+		for (Entry<String, List<RtcChangeSet>> entry : components.entrySet()) {
+			changeSetOrderIndex.put(entry.getKey(), new AtomicInteger(0));
+			sortByHistory(entry.getValue());
 		}
 
 		while (changeSets.size() < totalChangeSetCount) {
 			changeSets.add(getLatestChangeSet(changeSetOrderIndex));
 		}
 		return changeSets;
+	}
+
+	/**
+	 * Within a component, change sets must be accepted in the order they were delivered, which can differ from the
+	 * order the change log lists them in (creation date).
+	 */
+	private static void sortByHistory(List<RtcChangeSet> changeSets) {
+		for (RtcChangeSet changeSet : changeSets) {
+			if (changeSet.getHistoryIndex() < 0) {
+				return; // order unknown, keep the change log order
+			}
+		}
+		Collections.sort(changeSets, new Comparator<RtcChangeSet>() {
+			@Override
+			public int compare(RtcChangeSet a, RtcChangeSet b) {
+				return Integer.compare(a.getHistoryIndex(), b.getHistoryIndex());
+			}
+		});
 	}
 
 	private RtcChangeSet getLatestChangeSet(Map<String, AtomicInteger> changeSetOrderIndex) {

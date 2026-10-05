@@ -7,6 +7,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.Formatter;
 import java.util.HashSet;
 import java.util.Iterator;
@@ -25,6 +26,7 @@ import org.eclipse.jgit.api.CheckoutCommand;
 import org.eclipse.jgit.api.Git;
 import org.eclipse.jgit.api.RmCommand;
 import org.eclipse.jgit.api.Status;
+import org.eclipse.jgit.api.errors.EmptyCommitException;
 import org.eclipse.jgit.api.errors.GitAPIException;
 import org.eclipse.jgit.ignore.FastIgnoreRule;
 import org.eclipse.jgit.lib.Config;
@@ -35,6 +37,9 @@ import org.eclipse.jgit.lib.Ref;
 import org.eclipse.jgit.lib.Repository;
 import org.eclipse.jgit.lib.StoredConfig;
 import org.eclipse.jgit.revwalk.RevCommit;
+import org.eclipse.jgit.revwalk.RevObject;
+import org.eclipse.jgit.revwalk.RevTag;
+import org.eclipse.jgit.revwalk.RevWalk;
 import org.eclipse.jgit.storage.file.WindowCacheConfig;
 
 import to.rtc.cli.migrate.ChangeSet;
@@ -76,6 +81,10 @@ public final class GitMigrator implements Migrator {
 	private boolean forceAddIgnored;
 	private List<FastIgnoreRule> intentionalIgnores;
 	private final Set<String> migratedChangeSets;
+	// files rewritten while handling removals that must be added, not removed (the root .gitignore)
+	private final Set<String> pendingAdds = new HashSet<String>();
+	// UUIDs of the EWM baselines that already have a tag (read from the tag messages)
+	private Set<String> taggedBaselines;
 
 	public GitMigrator(Properties properties) {
 		ignoredFileExtensions = new HashSet<String>();
@@ -234,6 +243,9 @@ public final class GitMigrator implements Migrator {
 			Set<String> toForce = handleIgnoredButVersioned(status);
 			Set<String> toRestore = new HashSet<String>();
 			Set<String> toRemove = handleRemoved(status, toRestore);
+			toAdd.addAll(pendingAdds);
+			toRemove.removeAll(pendingAdds);
+			pendingAdds.clear();
 
 			// execute the git index commands if needed
 			if (!toAdd.isEmpty()) {
@@ -266,9 +278,15 @@ public final class GitMigrator implements Migrator {
 				checkout.call();
 			}
 
-			// execute commit if something has changed, or to keep one commit per change set
+			// commit what is staged; JGit compares the index with HEAD, so staging that changed nothing (e.g. an
+			// ignored empty folder) does not produce a commit unless one commit per change set is wanted
 			if (!toAdd.isEmpty() || !toForce.isEmpty() || !toRemove.isEmpty() || allowEmpty) {
-				git.commit().setMessage(comment).setAuthor(ident).setCommitter(ident).setAllowEmpty(true).call();
+				try {
+					git.commit().setMessage(comment).setAuthor(ident).setCommitter(ident).setAllowEmpty(allowEmpty)
+							.call();
+				} catch (EmptyCommitException e) {
+					// nothing changed
+				}
 			}
 
 			++commitsAfterClean;
@@ -382,7 +400,14 @@ public final class GitMigrator implements Migrator {
 				if (matcher.matches()) {
 					File jazzIgnore = new File(rootDir, relativeFileName);
 					String gitignoreFile = matcher.group(1).concat(".gitignore");
-					if (jazzIgnore.exists()) {
+					if (matcher.group(1).isEmpty()) {
+						// the root .gitignore also holds the migration's own entries: only replace the block that
+						// comes from the root .jazzignore
+						updateRootJazzignoreBlock(jazzIgnore.exists() ? JazzignoreTranslator.toGitignore(jazzIgnore)
+								: Collections.<String> emptyList());
+						pendingAdds.add(gitignoreFile);
+						continue;
+					} else if (jazzIgnore.exists()) {
 						// change/add case
 						List<String> ignoreContent = JazzignoreTranslator.toGitignore(jazzIgnore);
 						Files.writeLines(new File(rootDir, gitignoreFile), ignoreContent, getCharset(), false);
@@ -398,6 +423,30 @@ public final class GitMigrator implements Migrator {
 		} catch (IOException e) {
 			throw new RuntimeException("Unable to handle .jazzignore", e);
 		}
+	}
+
+	static final String ROOT_JAZZIGNORE_BEGIN = "# >>> translated from /.jazzignore";
+	static final String ROOT_JAZZIGNORE_END = "# <<< translated from /.jazzignore";
+
+	private void updateRootJazzignoreBlock(List<String> translated) throws IOException {
+		File rootGitignore = new File(rootDir, ".gitignore");
+		List<String> lines = new ArrayList<String>();
+		boolean inBlock = false;
+		for (String line : Files.readLines(rootGitignore, getCharset())) {
+			if (line.equals(ROOT_JAZZIGNORE_BEGIN)) {
+				inBlock = true;
+			} else if (line.equals(ROOT_JAZZIGNORE_END)) {
+				inBlock = false;
+			} else if (!inBlock) {
+				lines.add(line);
+			}
+		}
+		if (!translated.isEmpty()) {
+			lines.add(ROOT_JAZZIGNORE_BEGIN);
+			lines.addAll(translated);
+			lines.add(ROOT_JAZZIGNORE_END);
+		}
+		Files.writeLines(rootGitignore, lines, getCharset(), false);
 	}
 
 	private void handleGlobalFileExtensions(Set<String> addToGitIndex) {
@@ -617,6 +666,12 @@ public final class GitMigrator implements Migrator {
 		}
 		try {
 			Repository repository = git.getRepository();
+			for (String baseline : tag.getBaselineUuids()) {
+				if (getTaggedBaselines().contains(baseline)) {
+					// tagged by an earlier run
+					return;
+				}
+			}
 			ObjectId head = repository.resolve(Constants.HEAD);
 			String baseName = createTagName(tagName);
 			String name = baseName;
@@ -639,11 +694,32 @@ public final class GitMigrator implements Migrator {
 			}
 			git.tag().setName(name).setAnnotated(true).setMessage(message.toString())
 					.setTagger(new PersonIdent(defaultIdent, when, identities.getZoneId())).call();
+			getTaggedBaselines().addAll(tag.getBaselineUuids());
 		} catch (RuntimeException e) {
 			throw e;
 		} catch (Exception e) {
 			throw new RuntimeException("Unable to tag", e);
 		}
+	}
+
+	private Set<String> getTaggedBaselines() throws IOException {
+		if (taggedBaselines == null) {
+			taggedBaselines = new HashSet<String>();
+			Repository repository = git.getRepository();
+			try (RevWalk walk = new RevWalk(repository)) {
+				for (Ref ref : repository.getRefDatabase().getRefsByPrefix(Constants.R_TAGS)) {
+					RevObject object = walk.parseAny(ref.getObjectId());
+					if (object instanceof RevTag) {
+						for (String line : ((RevTag) object).getFullMessage().split("\n")) {
+							if (line.startsWith(BASELINE_TRAILER + ": ")) {
+								taggedBaselines.add(line.substring(BASELINE_TRAILER.length() + 2).trim());
+							}
+						}
+					}
+				}
+			}
+		}
+		return taggedBaselines;
 	}
 
 	private static ObjectId peeled(Repository repository, Ref ref) throws IOException {

@@ -197,6 +197,22 @@ public class GitMigratorHistoryTest {
 		assertEquals(Arrays.asList("refs/tags/R1", "refs/tags/R1_2"), tagNames());
 	}
 
+	@Test
+	public void testBaselineIsTaggedOnlyOnceAcrossRuns() throws Exception {
+		migrator.init(basedir);
+		migrator.createTag(tag("Week 1", 1L, "bl-1"));
+		write("a.txt", "a");
+		migrator.commitChanges(changeSet("cs-1", "later work"));
+		migrator.close();
+
+		// resumed run: the baseline comes again, now with an empty change set list
+		migrator = new GitMigrator(props);
+		migrator.init(basedir);
+		migrator.createTag(tag("Week 1", 1L, "bl-1"));
+
+		assertEquals(Arrays.asList("refs/tags/Week_1"), tagNames());
+	}
+
 	private List<String> tagNames() throws Exception {
 		try (Git git = Git.open(basedir)) {
 			List<String> names = new ArrayList<String>();

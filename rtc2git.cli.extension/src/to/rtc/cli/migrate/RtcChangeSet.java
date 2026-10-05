@@ -17,6 +17,7 @@ final class RtcChangeSet implements ChangeSet {
 	private String component;
 	private String componentUuid;
 	private String creatorUserId;
+	private int historyIndex = -1;
 
 	RtcChangeSet(String changeSetUuid) {
 		uuid = changeSetUuid;
@@ -68,6 +69,19 @@ final class RtcChangeSet implements ChangeSet {
 	 */
 	String getComponentKey() {
 		return componentUuid != null ? componentUuid : component;
+	}
+
+	/**
+	 * @param historyIndex
+	 *            position of the change set in its component's history (delivery order), oldest = 0
+	 */
+	RtcChangeSet setHistoryIndex(int historyIndex) {
+		this.historyIndex = historyIndex;
+		return this;
+	}
+
+	int getHistoryIndex() {
+		return historyIndex;
 	}
 
 	String getComponentUuid() {

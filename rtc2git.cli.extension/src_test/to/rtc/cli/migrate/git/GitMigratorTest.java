@@ -279,7 +279,9 @@ public class GitMigratorTest {
 		migrator.commitChanges(TestChangeSet.INSTANCE);
 
 		checkGit("Heiri Mueller", "heiri.mueller@irgendwo.ch", "4711 the checkin comment");
-		checkExactLines(new File(basedir, ".gitignore"), Arrays.asList("/*.suo", "*.class"));
+		// the root .gitignore keeps the migration's own entries; the .jazzignore translation is a marked block
+		checkExactLines(new File(basedir, ".gitignore"), Arrays.asList("/.jazz5", "/.jazzShed", "/.metadata",
+				GitMigrator.ROOT_JAZZIGNORE_BEGIN, "/*.suo", "*.class", GitMigrator.ROOT_JAZZIGNORE_END));
 	}
 
 	@Test
@@ -311,7 +313,8 @@ public class GitMigratorTest {
 
 		migrator.commitChanges(TestChangeSet.INSTANCE);
 
-		assertFalse(gitignore.exists());
+		// only the translated block goes; the root .gitignore keeps protecting the scm metadata
+		checkExactLines(gitignore, GitMigrator.ROOT_IGNORED_ENTRIES);
 	}
 
 	@Test

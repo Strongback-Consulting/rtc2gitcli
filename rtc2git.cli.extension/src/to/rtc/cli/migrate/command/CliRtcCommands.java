@@ -23,6 +23,11 @@ public class CliRtcCommands implements RtcCommands {
 	}
 
 	@Override
+	public String getWorkspace() {
+		return workspace;
+	}
+
+	@Override
 	public int accept(String changeSetUuid, boolean acceptMissingChangeSets) throws CLIClientException {
 		return new AcceptCommandDelegate(config, output, connection, workspace, changeSetUuid,
 				acceptMissingChangeSets).run();

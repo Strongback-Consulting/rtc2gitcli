@@ -1,10 +1,13 @@
 package to.rtc.cli.migrate;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
+import java.io.ByteArrayOutputStream;
 import java.io.File;
+import java.io.PrintStream;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -153,6 +156,53 @@ public class RtcMigratorTest {
 		assertTrue(migrator.commits.isEmpty());
 	}
 
+	@Test
+	public void testFailureAfterAcceptExplainsHowToRecover() throws Throwable {
+		commands.acceptResults(OK);
+		commands.loadResults(Constants.STATUS_CFA_COLLISION);
+		ByteArrayOutputStream log = new ByteArrayOutputStream();
+
+		try {
+			new RtcMigrator(new StreamOutput(new PrintStream(log, true)), commands, migrator, new File("."),
+					Collections.<String> emptyList(), false).migrateTag(tag("cs-1"));
+			fail();
+		} catch (CLIClientException e) {
+			// expected
+		}
+		assertTrue(log.toString(), log.toString().contains("scm discard -w \"target-ws\" cs-1"));
+	}
+
+	@Test
+	public void testFailedAcceptNeedsNoRecovery() throws Throwable {
+		commands.acceptResults(Constants.STATUS_FAILURE);
+		ByteArrayOutputStream log = new ByteArrayOutputStream();
+
+		try {
+			new RtcMigrator(new StreamOutput(new PrintStream(log, true)), commands, migrator, new File("."),
+					Collections.singleton("comp-uuid"), false).migrateTag(tag("cs-1"));
+			fail();
+		} catch (CLIClientException e) {
+			// expected
+		}
+		assertFalse(log.toString().contains("scm discard"));
+	}
+
+	@Test
+	public void testCommitFailureExplainsHowToRecover() throws Throwable {
+		commands.acceptResults(OK);
+		migrator.failCommit = true;
+		ByteArrayOutputStream log = new ByteArrayOutputStream();
+
+		try {
+			new RtcMigrator(new StreamOutput(new PrintStream(log, true)), commands, migrator, new File("."),
+					Collections.singleton("comp-uuid"), false).migrateTag(tag("cs-1"));
+			fail();
+		} catch (IllegalStateException e) {
+			// expected
+		}
+		assertTrue(log.toString().contains("scm discard -w \"target-ws\" cs-1"));
+	}
+
 	private RtcMigrator migrator(boolean acceptMissing, String... loadedComponents) {
 		return new RtcMigrator(new StreamOutput(System.out), commands, migrator, new File("."),
 				Arrays.asList(loadedComponents), acceptMissing);
@@ -186,6 +236,11 @@ public class RtcMigratorTest {
 		}
 
 		@Override
+		public String getWorkspace() {
+			return "target-ws";
+		}
+
+		@Override
 		public int accept(String changeSetUuid, boolean acceptMissingChangeSets) {
 			calls.add("accept " + changeSetUuid + (acceptMissingChangeSets ? " --accept-missing-changesets" : ""));
 			return acceptResults.remove();
@@ -202,6 +257,7 @@ public class RtcMigratorTest {
 		final List<String> commits = new ArrayList<String>();
 		final List<String> tags = new ArrayList<String>();
 		final Set<String> migrated = new HashSet<String>();
+		boolean failCommit;
 
 		@Override
 		public void init(File sandboxRootDirectory) {
@@ -218,6 +274,9 @@ public class RtcMigratorTest {
 
 		@Override
 		public void commitChanges(ChangeSet changeSet) {
+			if (failCommit) {
+				throw new IllegalStateException("disk full");
+			}
 			commits.add(changeSet.getUuid());
 		}
 

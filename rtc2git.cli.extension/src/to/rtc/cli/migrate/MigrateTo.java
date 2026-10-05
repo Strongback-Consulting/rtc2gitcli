@@ -50,7 +50,8 @@ import com.ibm.team.rtc.cli.infrastructure.internal.parser.ICommandLine;
 import com.ibm.team.scm.client.IWorkspaceConnection;
 import com.ibm.team.scm.client.IWorkspaceManager;
 import com.ibm.team.scm.client.SCMPlatform;
-import com.ibm.team.scm.client.internal.ClientChangeSetEntry;
+import com.ibm.team.scm.client.IChangeHistory;
+import com.ibm.team.scm.common.IChangeHistoryEntryChange;
 import com.ibm.team.scm.common.IChangeSetHandle;
 import com.ibm.team.scm.common.IComponent;
 import com.ibm.team.scm.common.IComponentHandle;
@@ -211,33 +212,46 @@ public abstract class MigrateTo extends AbstractSubcommand implements ISubcomman
 		}
 	}
 
-	private Map<String, String> getLastChangeSetUuids(ITeamRepository repo, IWorkspace sourceWs) {
-		IWorkspaceConnection sourceWsConnection;
+	/**
+	 * Reads the complete change history of every component of the source workspace, oldest change set first. This
+	 * is the order in which the change sets were delivered, which can differ from their creation order.
+	 *
+	 * @return component UUID -> change set UUIDs in delivery order
+	 */
+	Map<String, List<String>> getChangeSetHistory(ITeamRepository repo, IWorkspace sourceWs)
+			throws TeamRepositoryException {
 		IWorkspaceManager workspaceManager = SCMPlatform.getWorkspaceManager(repo);
 		IItemManager itemManager = repo.itemManager();
-		Map<String, String> lastChangeSets = new HashMap<String, String>();
-		try {
-			IProgressMonitor monitor = getMonitor();
-			sourceWsConnection = workspaceManager.getWorkspaceConnection(sourceWs, monitor);
-			@SuppressWarnings("unchecked")
-			List<IComponentHandle> componentHandles = sourceWsConnection.getComponents();
-			@SuppressWarnings("unchecked")
-			List<IComponent> components = itemManager.fetchCompleteItems(componentHandles, componentHandles.size(),
-					monitor);
-			for (IComponent component : components) {
-				@SuppressWarnings("unchecked")
-				List<ClientChangeSetEntry> changeSets = sourceWsConnection.changeHistory(component).recent(monitor);
-				// select first change set if there are any
-				if (!changeSets.isEmpty()) {
-					IChangeSetHandle changeSetHandle = changeSets.get(changeSets.size() - 1).changeSet();
-					lastChangeSets.put(component.getItemId().getUuidValue(),
-							changeSetHandle.getItemId().getUuidValue());
+		Map<String, List<String>> history = new HashMap<String, List<String>>();
+		IProgressMonitor monitor = getMonitor();
+		IWorkspaceConnection sourceWsConnection = workspaceManager.getWorkspaceConnection(sourceWs, monitor);
+		@SuppressWarnings("unchecked")
+		List<IComponentHandle> componentHandles = sourceWsConnection.getComponents();
+		@SuppressWarnings("unchecked")
+		List<IComponent> components = itemManager.fetchCompleteItems(componentHandles, componentHandles.size(),
+				monitor);
+		for (IComponent component : components) {
+			// recent() lists a page oldest to newest; previousHistory() steps to the next older page
+			List<List<String>> pages = new ArrayList<List<String>>();
+			for (IChangeHistory page = sourceWsConnection.changeHistory(component); page != null; page = page
+					.previousHistory(monitor)) {
+				List<String> uuids = new ArrayList<String>();
+				for (Object entry : page.recent(monitor)) {
+					IChangeSetHandle changeSet = ((IChangeHistoryEntryChange) entry).changeSet();
+					uuids.add(changeSet.getItemId().getUuidValue());
 				}
+				pages.add(0, uuids);
 			}
-		} catch (TeamRepositoryException e) {
-			e.printStackTrace(output.getOutputStream());
+			List<String> ordered = new ArrayList<String>();
+			for (List<String> page : pages) {
+				ordered.addAll(page);
+			}
+			history.put(component.getItemId().getUuidValue(), ordered);
+			output.writeLine("History of component [" + component.getName() + "]: " + ordered.size()
+					+ " change sets" + (ordered.isEmpty() ? ""
+							: ", oldest [" + ordered.get(0) + "], newest [" + ordered.get(ordered.size() - 1) + "]"));
 		}
-		return lastChangeSets;
+		return history;
 	}
 
 	private RtcTagList createTagListFromBaselines(IFilesystemRestClient client, ITeamRepository repo,
@@ -274,7 +288,8 @@ public abstract class MigrateTo extends AbstractSubcommand implements ISubcomman
 			// add default tag
 			tagList.getHeadTag();
 		} catch (TeamRepositoryException e) {
-			e.printStackTrace(output.getOutputStream());
+			// an incomplete history must not be migrated
+			throw new RuntimeException("Unable to read the history from the repository", e);
 		}
 		return tagList;
 	}
@@ -319,7 +334,7 @@ public abstract class MigrateTo extends AbstractSubcommand implements ISubcomman
 			output.writeLine("Get list of baselines and changesets form RTC took ["
 					+ (System.currentTimeMillis() - startTime) / 1000 + "]s.");
 			output.writeLine("Parse the list of baselines and changesets.");
-			HistoryEntryVisitor visitor = new HistoryEntryVisitor(tagList, getLastChangeSetUuids(repo, sourceWs),
+			HistoryEntryVisitor visitor = new HistoryEntryVisitor(tagList, getChangeSetHistory(repo, sourceWs),
 					new ChangeLogStreamOutput(config.getContext().stdout()));
 
 			startTime = System.currentTimeMillis();
@@ -328,7 +343,8 @@ public abstract class MigrateTo extends AbstractSubcommand implements ISubcomman
 					+ (System.currentTimeMillis() - startTime) / 1000 + "]s.");
 
 		} catch (TeamRepositoryException e) {
-			e.printStackTrace(output.getOutputStream());
+			// an incomplete history must not be migrated
+			throw new RuntimeException("Unable to read the history from the repository", e);
 		}
 	}
 

@@ -17,6 +17,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Date;
 import java.util.Iterator;
+import java.util.List;
 import java.util.regex.Pattern;
 
 import org.junit.Before;
@@ -201,6 +202,25 @@ public class RtcTagListTest {
 		RtcTag tag = tagList.iterator().next();
 		assertThat(tagList.size(), equalTo(1));
 		assertThat(new ArrayList<String>(tag.getBaselineUuids()), equalTo(Arrays.asList("excluded-uuid", "included-uuid")));
+	}
+
+	@Test
+	public void testChangeSetsOfAComponentFollowDeliveryOrder() {
+		RtcTag tag = new RtcTag("bl").setOriginalName("R1").setCreationDate(TODAY);
+		// change log order (by creation date) differs from the order of delivery
+		tag.add(new RtcChangeSet("share").setComponentUuid("build").setCreationDate(1).setHistoryIndex(2));
+		tag.add(new RtcChangeSet("war").setComponentUuid("build").setCreationDate(5).setHistoryIndex(3));
+		tag.add(new RtcChangeSet("mobile").setComponentUuid("build").setCreationDate(6).setHistoryIndex(1));
+		tag.add(new RtcChangeSet("other").setComponentUuid("ui").setCreationDate(2).setHistoryIndex(1));
+
+		List<String> order = new ArrayList<String>();
+		for (RtcChangeSet changeSet : tag.getOrderedChangeSets()) {
+			order.add(changeSet.getUuid());
+		}
+
+		assertThat(order.indexOf("mobile") < order.indexOf("share"), is(true));
+		assertThat(order.indexOf("share") < order.indexOf("war"), is(true));
+		assertThat(order.size(), equalTo(4));
 	}
 
 	@Test

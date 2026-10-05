@@ -7,6 +7,7 @@ import static org.junit.Assert.assertTrue;
 import java.io.File;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
+import java.util.List;
 import java.util.Properties;
 
 import org.eclipse.jgit.api.Git;
@@ -107,6 +108,46 @@ public class GitMigratorIgnoreTest {
 	}
 
 	@Test
+	public void testIgnoredEmptyFolderDoesNotCauseCommitOnResume() throws Exception {
+		migrator.init(basedir);
+		write("proj/.jazzignore", "core.ignore = {bin}");
+		migrator.commitChanges(GitMigratorHistoryTest.changeSet("cs-1", "ignore bin"));
+		new File(basedir, "proj/bin/com/jke").mkdirs();
+		migrator.close();
+		String headBefore = head();
+
+		migrator = new GitMigrator(props);
+		migrator.init(basedir);
+
+		assertEquals(headBefore, head());
+	}
+
+	@Test
+	public void testRootJazzignoreKeepsMigrationEntries() throws Exception {
+		props.setProperty("global.gitignore.entries", "*.log");
+		migrator.initialize(props);
+		migrator.init(basedir);
+		write(".jazzignore", "core.ignore = {bin}");
+		migrator.commitChanges(GitMigratorHistoryTest.changeSet("cs-1", "root jazzignore"));
+
+		List<String> lines = Files.readLines(new File(basedir, ".gitignore"), StandardCharsets.UTF_8);
+		assertTrue(lines.toString(), lines.containsAll(Arrays.asList("/.jazz5", "/.metadata", "*.log", "/bin")));
+
+		write(".jazzignore", "core.ignore = {out}");
+		migrator.commitChanges(GitMigratorHistoryTest.changeSet("cs-2", "changed"));
+		lines = Files.readLines(new File(basedir, ".gitignore"), StandardCharsets.UTF_8);
+		assertTrue(lines.contains("/out"));
+		assertFalse(lines.contains("/bin"));
+
+		new File(basedir, ".jazzignore").delete();
+		migrator.commitChanges(GitMigratorHistoryTest.changeSet("cs-3", "removed"));
+		lines = Files.readLines(new File(basedir, ".gitignore"), StandardCharsets.UTF_8);
+		assertFalse(lines.toString(), lines.contains("/out"));
+		assertTrue(lines.toString(), lines.contains("/.jazz5"));
+		assertTrue(isTracked(".gitignore"));
+	}
+
+	@Test
 	public void testIsIntentionallyIgnored() throws Exception {
 		props.setProperty("global.gitignore.entries", "/target; *.tmp");
 		migrator.initialize(props);
@@ -119,6 +160,12 @@ public class GitMigratorIgnoreTest {
 		assertFalse(migrator.isIntentionallyIgnored("src/target/A.class"));
 		assertFalse(migrator.isIntentionallyIgnored("A.class"));
 		assertEquals(false, migrator.isIntentionallyIgnored("bin"));
+	}
+
+	private String head() throws Exception {
+		try (Git git = Git.open(basedir)) {
+			return git.getRepository().resolve("HEAD").name();
+		}
 	}
 
 	private boolean isTracked(String path) throws Exception {
