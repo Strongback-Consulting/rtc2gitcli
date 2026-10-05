@@ -45,6 +45,15 @@ public interface ChangeSet {
 	public List<WorkItem> getWorkItems();
 
 	/**
+	 * Returns when the change set was completed (used as commit date); defaults to the creation date.
+	 *
+	 * @return the completion time stamp
+	 */
+	default long getLastChangeDate() {
+		return getCreationDate();
+	}
+
+	/**
 	 * Returns the UUID of the change set in EWM, if known.
 	 *
 	 * @return the change set UUID or <code>null</code>

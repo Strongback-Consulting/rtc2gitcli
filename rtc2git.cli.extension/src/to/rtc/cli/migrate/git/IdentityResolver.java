@@ -50,8 +50,22 @@ final class IdentityResolver {
 		return zoneId;
 	}
 
+	/**
+	 * @return the author, dated with the creation of the change set
+	 */
 	PersonIdent resolve(ChangeSet changeSet) {
-		Instant when = Instant.ofEpochMilli(changeSet.getCreationDate());
+		return resolve(changeSet, changeSet.getCreationDate());
+	}
+
+	/**
+	 * @return the same person, dated with the completion of the change set
+	 */
+	PersonIdent resolveCommitter(ChangeSet changeSet) {
+		return resolve(changeSet, Math.max(changeSet.getCreationDate(), changeSet.getLastChangeDate()));
+	}
+
+	private PersonIdent resolve(ChangeSet changeSet, long time) {
+		Instant when = Instant.ofEpochMilli(time);
 		PersonIdent mapped = lookup(changeSet.getCreatorUserId());
 		if (mapped == null) {
 			mapped = lookup(changeSet.getCreatorName());

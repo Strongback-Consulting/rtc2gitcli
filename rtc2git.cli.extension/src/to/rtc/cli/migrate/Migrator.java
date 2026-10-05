@@ -1,6 +1,7 @@
 package to.rtc.cli.migrate;
 
 import java.io.File;
+import java.util.Collection;
 
 /**
  * @author florian.buehlmann
@@ -38,6 +39,16 @@ public interface Migrator {
 	 */
 	default boolean isMigrated(String changeSetUuid) {
 		return false;
+	}
+
+	/**
+	 * Receives the EWM properties of all files in the sandbox: before {@link #init(File)} for the initial content,
+	 * then before each {@link #commitChanges(ChangeSet)}.
+	 *
+	 * @param files
+	 *            all files and folders with their current paths
+	 */
+	default void updateFileProperties(Collection<FileProperties> files) {
 	}
 
 }

@@ -3,6 +3,7 @@ package to.rtc.cli.migrate;
 import java.io.File;
 import java.lang.reflect.Field;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -14,6 +15,7 @@ import org.eclipse.core.runtime.NullProgressMonitor;
 import to.rtc.cli.migrate.command.CliRtcCommands;
 import to.rtc.cli.migrate.command.RtcCommands;
 import to.rtc.cli.migrate.command.RtcConnection;
+import to.rtc.cli.migrate.ewm.EwmChangeSetDetails;
 
 import com.ibm.team.filesystem.cli.client.AbstractSubcommand;
 import com.ibm.team.filesystem.cli.core.internal.ScmCommandLineArgument;
@@ -158,6 +160,11 @@ public abstract class MigrateTo extends AbstractSubcommand implements ISubcomman
 				sandboxDirectory = new File(System.getProperty("user.dir"));
 			}
 			Migrator migrator = getMigrator();
+			// file properties of what is already in the sandbox, so that the initial commit gets them too
+			ChangeSetDetails details = new EwmChangeSetDetails(repo, destinationWs);
+			Collection<FileProperties> initialFiles = details.readAll();
+			output.writeLine("Read the properties of " + initialFiles.size() + " files and folders of the target workspace");
+			migrator.updateFileProperties(initialFiles);
 			migrator.init(sandboxDirectory);
 
 			Map<String, String> destinationWsComponents = RepoUtil.getComponentsInSandbox(
@@ -168,6 +175,7 @@ public abstract class MigrateTo extends AbstractSubcommand implements ISubcomman
 					destinationWsOption.getStringValue());
 			RtcMigrator rtcMigrator = new RtcMigrator(output, commands, migrator, sandboxDirectory,
 					destinationWsComponents.keySet(), isAcceptMissingChangeSets());
+			rtcMigrator.useChangeSetDetails(details, initialFiles);
 			boolean isFirstTag = true;
 			int numberOfTags = tagList.size();
 			int tagCounter = 0;

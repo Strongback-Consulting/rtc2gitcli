@@ -203,6 +203,33 @@ public class RtcMigratorTest {
 		assertTrue(log.toString().contains("scm discard -w \"target-ws\" cs-1"));
 	}
 
+	@Test
+	public void testFilePropertiesAreReadAfterEachAccept() throws Throwable {
+		commands.acceptResults(OK, OK);
+		final List<String> read = new ArrayList<String>();
+		RtcMigrator rtcMigrator = migrator(false, "comp-uuid");
+		rtcMigrator.useChangeSetDetails(new ChangeSetDetails() {
+			@Override
+			public java.util.Collection<FileProperties> readAll() {
+				return Collections.emptyList();
+			}
+
+			@Override
+			public Update read(String changeSetUuid) {
+				read.add(changeSetUuid);
+				return new Update(99000).changed(FileProperties.file("item-" + changeSetUuid,
+						changeSetUuid + ".txt", FileProperties.LineDelimiter.LF, "text/plain", "UTF-8", false,
+						Collections.<String, String> emptyMap()));
+			}
+		}, Collections.<FileProperties> emptyList());
+
+		rtcMigrator.migrateTag(tag("cs-1", "cs-2"));
+
+		assertEquals(Arrays.asList("cs-1", "cs-2"), read);
+		assertEquals(Arrays.asList(1, 2), migrator.propertyUpdates);
+		assertEquals(Arrays.asList(99000L, 99000L), migrator.lastChangeDates);
+	}
+
 	private RtcMigrator migrator(boolean acceptMissing, String... loadedComponents) {
 		return new RtcMigrator(new StreamOutput(System.out), commands, migrator, new File("."),
 				Arrays.asList(loadedComponents), acceptMissing);
@@ -258,6 +285,13 @@ public class RtcMigratorTest {
 		final List<String> tags = new ArrayList<String>();
 		final Set<String> migrated = new HashSet<String>();
 		boolean failCommit;
+		final List<Integer> propertyUpdates = new ArrayList<Integer>();
+		final List<Long> lastChangeDates = new ArrayList<Long>();
+
+		@Override
+		public void updateFileProperties(java.util.Collection<FileProperties> files) {
+			propertyUpdates.add(files.size());
+		}
 
 		@Override
 		public void init(File sandboxRootDirectory) {
@@ -278,6 +312,7 @@ public class RtcMigratorTest {
 				throw new IllegalStateException("disk full");
 			}
 			commits.add(changeSet.getUuid());
+			lastChangeDates.add(changeSet.getLastChangeDate());
 		}
 
 		@Override

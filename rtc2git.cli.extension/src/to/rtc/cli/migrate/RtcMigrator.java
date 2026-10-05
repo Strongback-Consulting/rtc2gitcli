@@ -27,6 +27,8 @@ public class RtcMigrator {
 	private final Migrator migrator;
 	private final Set<String> initiallyLoadedComponents;
 	private final boolean acceptMissingChangeSets;
+	private ChangeSetDetails details;
+	private final FilePropertiesModel model = new FilePropertiesModel();
 	private File sandboxDirectory;
 
 	/**
@@ -46,6 +48,17 @@ public class RtcMigrator {
 		this.acceptMissingChangeSets = acceptMissingChangeSets;
 	}
 
+	/**
+	 * Reads the EWM file properties after each accept and passes them to the migrator.
+	 *
+	 * @param initial
+	 *            the properties of the files already in the sandbox
+	 */
+	public void useChangeSetDetails(ChangeSetDetails changeSetDetails, Collection<FileProperties> initial) {
+		this.details = changeSetDetails;
+		model.reset(initial);
+	}
+
 	public void migrateTag(RtcTag tag) throws CLIClientException {
 		List<RtcChangeSet> changeSets = tag.getOrderedChangeSets();
 		int changeSetCounter = 0;
@@ -59,6 +72,12 @@ public class RtcMigrator {
 				acceptAndLoadChangeSet(changeSet);
 				accepted = true;
 				handleInitialLoad(changeSet);
+				if (details != null) {
+					ChangeSetDetails.Update update = details.read(changeSet.getUuid());
+					changeSet.setLastChangeDate(update.getLastChangeDate());
+					model.apply(update);
+					migrator.updateFileProperties(model.getAll());
+				}
 				long acceptDuration = System.currentTimeMillis() - startAccept;
 				long commitDuration = 0;
 				if (migrator.isMigrated(changeSet.getUuid())) {

@@ -29,9 +29,14 @@ import org.eclipse.jgit.api.Status;
 import org.eclipse.jgit.api.errors.EmptyCommitException;
 import org.eclipse.jgit.api.errors.GitAPIException;
 import org.eclipse.jgit.ignore.FastIgnoreRule;
+import org.eclipse.jgit.dircache.DirCache;
+import org.eclipse.jgit.dircache.DirCacheEditor;
+import org.eclipse.jgit.dircache.DirCacheEntry;
 import org.eclipse.jgit.lib.Config;
 import org.eclipse.jgit.lib.Constants;
+import org.eclipse.jgit.lib.FileMode;
 import org.eclipse.jgit.lib.ObjectId;
+import org.eclipse.jgit.lib.ObjectInserter;
 import org.eclipse.jgit.lib.PersonIdent;
 import org.eclipse.jgit.lib.Ref;
 import org.eclipse.jgit.lib.Repository;
@@ -44,6 +49,7 @@ import org.eclipse.jgit.storage.file.WindowCacheConfig;
 
 import to.rtc.cli.migrate.ChangeSet;
 import to.rtc.cli.migrate.ChangeSet.WorkItem;
+import to.rtc.cli.migrate.FileProperties;
 import to.rtc.cli.migrate.Migrator;
 import to.rtc.cli.migrate.Tag;
 import to.rtc.cli.migrate.util.CommitCommentTranslator;
@@ -83,6 +89,14 @@ public final class GitMigrator implements Migrator {
 	private final Set<String> migratedChangeSets;
 	// files rewritten while handling removals that must be added, not removed (the root .gitignore)
 	private final Set<String> pendingAdds = new HashSet<String>();
+	private boolean attributesFromEwm;
+	private GitattributesGenerator attributesGenerator;
+	private Collection<FileProperties> propertiesBeforeInit;
+	private final Set<String> executablePaths = new TreeSet<String>();
+	static final String KEEP_FILE = ".gitkeep";
+	private boolean keepEmptyFolders;
+	// index-only placeholders for folders that are empty in EWM (never written to the sandbox)
+	private final Set<String> keepFiles = new TreeSet<String>();
 	// UUIDs of the EWM baselines that already have a tag (read from the tag messages)
 	private Set<String> taggedBaselines;
 
@@ -234,7 +248,7 @@ public final class GitMigrator implements Migrator {
 		}
 	}
 
-	private void gitCommit(PersonIdent ident, String comment, boolean allowEmpty) {
+	private void gitCommit(PersonIdent author, PersonIdent committer, String comment, boolean allowEmpty) {
 		try {
 			// add all untracked files
 			Status status = git.status().call();
@@ -270,6 +284,8 @@ public final class GitMigrator implements Migrator {
 				}
 				rm.call();
 			}
+			markExecutables();
+			syncKeepFiles();
 			if (!toRestore.isEmpty()) {
 				CheckoutCommand checkout = git.checkout();
 				for (String filepattern : toRestore) {
@@ -280,10 +296,10 @@ public final class GitMigrator implements Migrator {
 
 			// commit what is staged; JGit compares the index with HEAD, so staging that changed nothing (e.g. an
 			// ignored empty folder) does not produce a commit unless one commit per change set is wanted
-			if (!toAdd.isEmpty() || !toForce.isEmpty() || !toRemove.isEmpty() || allowEmpty) {
+			if (!toAdd.isEmpty() || !toForce.isEmpty() || !toRemove.isEmpty() || allowEmpty || keepEmptyFolders) {
 				try {
-					git.commit().setMessage(comment).setAuthor(ident).setCommitter(ident).setAllowEmpty(allowEmpty)
-							.call();
+					git.commit().setMessage(comment).setAuthor(author).setCommitter(committer)
+							.setAllowEmpty(allowEmpty).call();
 				} catch (EmptyCommitException e) {
 					// nothing changed
 				}
@@ -312,6 +328,9 @@ public final class GitMigrator implements Migrator {
 		Set<String> toRemove = new HashSet<String>();
 		// go over all deleted files
 		for (String removed : status.getMissing()) {
+			if (isKeepFile(removed)) {
+				continue; // index-only placeholder, see syncKeepFiles
+			}
 			Matcher matcher = GITIGNORE_PATTERN.matcher(removed);
 			if (matcher.matches()) {
 				File jazzignore = new File(rootDir, matcher.group(1).concat(".jazzignore"));
@@ -513,6 +532,10 @@ public final class GitMigrator implements Migrator {
 		commitEmptyChangeSets = Boolean.parseBoolean(props.getProperty("commit.empty.changesets", "true"));
 		changeSetTrailer = Boolean.parseBoolean(props.getProperty("commit.changeset.trailer", "true"));
 		forceAddIgnored = Boolean.parseBoolean(props.getProperty("commit.force.add.ignored", "true"));
+		attributesFromEwm = Boolean.parseBoolean(props.getProperty("gitattributes.from.ewm", "true"));
+		keepEmptyFolders = Boolean.parseBoolean(props.getProperty("keep.empty.folders", "false"));
+		attributesGenerator = new GitattributesGenerator(
+				Boolean.parseBoolean(props.getProperty("gitattributes.working-tree-encoding", "false")));
 		intentionalIgnores = null;
 		parseElements(props.getProperty("ignore.file.extensions", ""), ignoredFileExtensions);
 		// update window cache config
@@ -583,8 +606,15 @@ public final class GitMigrator implements Migrator {
 			getWindowCacheConfig().install();
 			initRootGitignore(sandboxRootDirectory);
 			initRootGitattributes(sandboxRootDirectory);
+			if (propertiesBeforeInit != null) {
+				writeGeneratedAttributes(propertiesBeforeInit);
+				propertiesBeforeInit = null;
+			}
 			initConfig();
-			gitCommit(new PersonIdent(defaultIdent, Instant.now(), identities.getZoneId()), "Initial commit", false);
+			boolean resumed = git.getRepository().resolve(Constants.HEAD) != null;
+			PersonIdent now = new PersonIdent(defaultIdent, Instant.now(), identities.getZoneId());
+			gitCommit(now, now, resumed ? "Update generated files before resuming the migration" : "Initial commit",
+					false);
 		} catch (IOException e) {
 			throw new RuntimeException("Unable to initialize GIT repository", e);
 		} catch (GitAPIException e) {
@@ -626,9 +656,159 @@ public final class GitMigrator implements Migrator {
 		if (changeSetTrailer && uuid != null) {
 			message = message + "\n\n" + CHANGE_SET_TRAILER + ": " + uuid;
 		}
-		gitCommit(identities.resolve(changeset), message, commitEmptyChangeSets && uuid != null);
+		gitCommit(identities.resolve(changeset), identities.resolveCommitter(changeset), message,
+				commitEmptyChangeSets && uuid != null);
 		if (uuid != null) {
 			migratedChangeSets.add(uuid);
+		}
+	}
+
+	@Override
+	public void updateFileProperties(Collection<FileProperties> files) {
+		if (keepEmptyFolders) {
+			updateKeepFiles(files);
+		}
+		if (!attributesFromEwm) {
+			return;
+		}
+		if (rootDir == null) {
+			propertiesBeforeInit = new ArrayList<FileProperties>(files);
+			return;
+		}
+		try {
+			writeGeneratedAttributes(files);
+		} catch (IOException e) {
+			throw new RuntimeException("Unable to write .gitattributes", e);
+		}
+	}
+
+	/**
+	 * Replaces the generated block of the root <code>.gitattributes</code>; lines from the <code>gitattributes</code>
+	 * property stay in front of it.
+	 */
+	private void writeGeneratedAttributes(Collection<FileProperties> files) throws IOException {
+		executablePaths.clear();
+		for (FileProperties file : files) {
+			if (!file.isFolder() && file.isExecutable()) {
+				executablePaths.add(file.getPath());
+			}
+		}
+		List<String> generated = attributesGenerator.generate(files);
+		File gitattributes = new File(rootDir, ".gitattributes");
+		List<String> existing = Files.readLines(gitattributes, getCharset());
+		List<String> lines = new ArrayList<String>();
+		boolean inBlock = false;
+		for (String line : existing) {
+			if (line.equals(GitattributesGenerator.BEGIN)) {
+				inBlock = true;
+			} else if (line.equals(GitattributesGenerator.END)) {
+				inBlock = false;
+			} else if (!inBlock) {
+				lines.add(line);
+			}
+		}
+		if (!generated.isEmpty()) {
+			lines.add(GitattributesGenerator.BEGIN);
+			lines.addAll(generated);
+			lines.add(GitattributesGenerator.END);
+		}
+		if (!lines.equals(existing)) {
+			Files.writeLines(gitattributes, lines, getCharset(), false);
+		}
+	}
+
+	private void updateKeepFiles(Collection<FileProperties> files) {
+		Set<String> emptyFolders = new TreeSet<String>();
+		Set<String> parents = new HashSet<String>();
+		for (FileProperties item : files) {
+			if (item.isFolder()) {
+				emptyFolders.add(item.getPath());
+			}
+			for (String parent = parent(item.getPath()); parent != null; parent = parent(parent)) {
+				parents.add(parent);
+			}
+		}
+		emptyFolders.removeAll(parents);
+		keepFiles.clear();
+		for (String folder : emptyFolders) {
+			keepFiles.add(folder + "/" + KEEP_FILE);
+		}
+	}
+
+	private static boolean isKeepFile(String path) {
+		return path.equals(KEEP_FILE) || path.endsWith("/" + KEEP_FILE);
+	}
+
+	/**
+	 * Adds the placeholders of empty EWM folders to the index and removes those of folders that are no longer empty.
+	 */
+	private void syncKeepFiles() throws IOException {
+		if (!keepEmptyFolders) {
+			return;
+		}
+		Repository repository = git.getRepository();
+		DirCache dirCache = repository.lockDirCache();
+		try (ObjectInserter inserter = repository.newObjectInserter()) {
+			final ObjectId empty = inserter.insert(Constants.OBJ_BLOB, new byte[0]);
+			inserter.flush();
+			DirCacheEditor editor = dirCache.editor();
+			boolean changed = false;
+			for (int i = 0; i < dirCache.getEntryCount(); i++) {
+				String path = dirCache.getEntry(i).getPathString();
+				if (isKeepFile(path) && !keepFiles.contains(path) && !new File(rootDir, path).exists()) {
+					editor.add(new DirCacheEditor.DeletePath(path));
+					changed = true;
+				}
+			}
+			for (String path : keepFiles) {
+				if (dirCache.getEntry(path) == null) {
+					editor.add(new DirCacheEditor.PathEdit(path) {
+						@Override
+						public void apply(DirCacheEntry entry) {
+							entry.setFileMode(FileMode.REGULAR_FILE);
+							entry.setObjectId(empty);
+							entry.setLength(0);
+							// not in the sandbox on purpose: keep git status clean
+							entry.setAssumeValid(true);
+						}
+					});
+					changed = true;
+				}
+			}
+			if (changed) {
+				editor.finish();
+				dirCache.write();
+				dirCache.commit();
+			}
+		} finally {
+			dirCache.unlock();
+		}
+	}
+
+	/**
+	 * EWM's executable flag becomes the git file mode, also where the file system has no executable bit.
+	 */
+	private void markExecutables() throws IOException {
+		if (executablePaths.isEmpty()) {
+			return;
+		}
+		DirCache dirCache = git.getRepository().lockDirCache();
+		try {
+			boolean changed = false;
+			for (String path : executablePaths) {
+				new File(rootDir, path).setExecutable(true);
+				DirCacheEntry entry = dirCache.getEntry(path);
+				if (entry != null && !FileMode.EXECUTABLE_FILE.equals(entry.getFileMode())) {
+					entry.setFileMode(FileMode.EXECUTABLE_FILE);
+					changed = true;
+				}
+			}
+			if (changed) {
+				dirCache.write();
+				dirCache.commit();
+			}
+		} finally {
+			dirCache.unlock();
 		}
 	}
 
@@ -646,9 +826,14 @@ public final class GitMigrator implements Migrator {
 			return;
 		}
 		Status status = git.status().call();
-		if (!status.isClean()) {
-			Set<String> pending = new TreeSet<String>(status.getUncommittedChanges());
-			pending.addAll(status.getUntracked());
+		Set<String> pending = new TreeSet<String>(status.getUncommittedChanges());
+		pending.addAll(status.getUntracked());
+		for (String missing : status.getMissing()) {
+			if (isKeepFile(missing)) {
+				pending.remove(missing);
+			}
+		}
+		if (!pending.isEmpty()) {
 			throw new IllegalStateException("The sandbox " + rootDir + " has uncommitted changes " + pending
 					+ ". A previous migration probably stopped after accepting a change set but before committing it."
 					+ " Commit or discard these changes, then run the migration again.");
