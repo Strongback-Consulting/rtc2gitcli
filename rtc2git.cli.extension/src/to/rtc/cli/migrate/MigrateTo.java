@@ -131,15 +131,29 @@ public abstract class MigrateTo extends AbstractSubcommand implements ISubcomman
 					subargs.getOptionValue(MigrateToOptions.OPT_DEST_WS), config);
 			SubcommandUtil.validateArgument(destinationWsOption, ItemType.WORKSPACE);
 
+			final File sandboxDirectory;
+			if (subargs.hasOption(CommonOptions.OPT_DIRECTORY)) {
+				sandboxDirectory = new File(subargs.getOption(CommonOptions.OPT_DIRECTORY));
+			} else {
+				sandboxDirectory = new File(System.getProperty("user.dir"));
+			}
+			boolean provision = subargs.hasOption(MigrateToOptions.OPT_STREAM);
+			if (provision && !subargs.hasOption(CommonOptions.OPT_DIRECTORY)
+					&& SubcommandUtil.findAncestorCFARoot(sandboxDirectory.getAbsolutePath()) == null) {
+				// outside a sandbox, scm runs every sub-command in a scratch area: the load of the target would
+				// register the new sandbox with a second daemon of this process and fail
+				throw new IllegalStateException("--stream needs the sandbox directory: pass -d <existing empty"
+						+ " directory>, or run inside a sandbox the target workspace is loaded in");
+			}
+
 			// Initialize connection to RTC
 			output.writeLine("Initialize RTC connection with connection timeout of " + timeout + "s");
 			IFilesystemRestClient client = SubcommandUtil.setupDaemon(config);
 			ITeamRepository repo = RepoUtil.loginUrlArgAncestor(config, client, destinationWsOption);
 			repo.setConnectionTimeout(timeout);
 
-			boolean workspacesCreated = false;
-			if (subargs.hasOption(MigrateToOptions.OPT_STREAM)) {
-				workspacesCreated = new WorkspaceProvisioner(repo, output).ensureWorkspaces(
+			if (provision) {
+				new WorkspaceProvisioner(repo, output).ensureWorkspaces(
 						subargs.getOption(MigrateToOptions.OPT_STREAM), subargs.getOption(MigrateToOptions.OPT_SRC_WS),
 						subargs.getOption(MigrateToOptions.OPT_DEST_WS));
 			}
@@ -148,12 +162,6 @@ public abstract class MigrateTo extends AbstractSubcommand implements ISubcomman
 			IWorkspace destinationWs = RepoUtil.getWorkspace(destinationWsOption.getItemSelector(), true, false, repo,
 					config);
 
-			final File sandboxDirectory;
-			if (subargs.hasOption(CommonOptions.OPT_DIRECTORY)) {
-				sandboxDirectory = new File(subargs.getOption(CommonOptions.OPT_DIRECTORY));
-			} else {
-				sandboxDirectory = new File(System.getProperty("user.dir"));
-			}
 			Migrator migrator = getMigrator();
 			if (!listTagsOnly) {
 				report = new MigrationReport(sourceWsOption.getStringValue(), destinationWsOption.getStringValue());
@@ -161,12 +169,14 @@ public abstract class MigrateTo extends AbstractSubcommand implements ISubcomman
 			}
 			RtcCommands commands = new CliRtcCommands(config, output, connection,
 					destinationWsOption.getStringValue(), sandboxDirectory.getAbsolutePath());
-			if (workspacesCreated) {
+			// also on a rerun after the workspaces were created but the load failed
+			if (provision && RepoUtil.getComponentsInSandbox(destinationWs.getItemId().getUuidValue(),
+					new PathLocation(sandboxDirectory.getAbsolutePath()), client, config).isEmpty()) {
 				if (new File(sandboxDirectory, ".git").exists()) {
-					throw new IllegalStateException("The workspaces were just created but the sandbox "
-							+ sandboxDirectory + " already contains a git repository; use an empty directory");
+					throw new IllegalStateException("The target workspace is not loaded in the sandbox "
+							+ sandboxDirectory + " but it contains a git repository; use an empty directory");
 				}
-				sandboxDirectory.mkdirs();
+				output.writeLine("Load the target workspace into " + sandboxDirectory.getAbsolutePath());
 				int loaded = commands.load(null, false);
 				if (loaded != Constants.STATUS_OK.intValue()) {
 					throw new CLIClientException("Loading the new target workspace failed with status [" + loaded + "]");
