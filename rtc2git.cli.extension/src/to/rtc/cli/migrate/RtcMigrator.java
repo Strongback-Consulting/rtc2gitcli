@@ -29,6 +29,7 @@ public class RtcMigrator {
 	private final boolean acceptMissingChangeSets;
 	private ChangeSetDetails details;
 	private final FilePropertiesModel model = new FilePropertiesModel();
+	private MigrationReport report;
 	private File sandboxDirectory;
 
 	/**
@@ -59,6 +60,10 @@ public class RtcMigrator {
 		model.reset(initial);
 	}
 
+	public void setReport(MigrationReport report) {
+		this.report = report;
+	}
+
 	public void migrateTag(RtcTag tag) throws CLIClientException {
 		List<RtcChangeSet> changeSets = tag.getOrderedChangeSets();
 		int changeSetCounter = 0;
@@ -82,8 +87,15 @@ public class RtcMigrator {
 				long commitDuration = 0;
 				if (migrator.isMigrated(changeSet.getUuid())) {
 					output.writeLine("Change set [" + changeSet.getUuid() + "] was already migrated, no new commit");
+					if (report != null) {
+						report.changeSetSkipped(changeSet, changeSet.getComponent(), tagName);
+					}
 				} else {
 					commitDuration = commit(changeSet);
+					if (report != null) {
+						report.changeSetMigrated(changeSet, changeSet.getComponent(), tagName,
+								migrator.getLastCommitId());
+					}
 				}
 				committed = true;
 				changeSetCounter++;
@@ -117,6 +129,9 @@ public class RtcMigrator {
 		cleanLocalHistory();
 		if (tag.doCreateTag()) {
 			migrator.createTag(tag);
+			if (report != null) {
+				report.tagged(tag);
+			}
 		}
 	}
 

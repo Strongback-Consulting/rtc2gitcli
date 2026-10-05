@@ -1,6 +1,7 @@
 package to.rtc.cli.migrate;
 
 import java.io.File;
+import java.io.IOException;
 import java.lang.reflect.Field;
 import java.util.ArrayList;
 import java.util.Collection;
@@ -21,6 +22,7 @@ import to.rtc.cli.migrate.command.CliRtcCommands;
 import to.rtc.cli.migrate.command.RtcCommands;
 import to.rtc.cli.migrate.command.RtcConnection;
 import to.rtc.cli.migrate.ewm.EwmChangeSetDetails;
+import to.rtc.cli.migrate.ewm.WorkspaceProvisioner;
 
 import com.ibm.team.filesystem.cli.client.AbstractSubcommand;
 import com.ibm.team.filesystem.cli.core.internal.ScmCommandLineArgument;
@@ -74,6 +76,8 @@ public abstract class MigrateTo extends AbstractSubcommand implements ISubcomman
 
 	private StreamOutput output;
 	private boolean listTagsOnly = false;
+	private MigrationReport report;
+	private File reportDirectory;
 
 	private IProgressMonitor getMonitor() {
 		return new LogTaskMonitor(new StreamOutput(config.getContext().stdout()));
@@ -133,6 +137,13 @@ public abstract class MigrateTo extends AbstractSubcommand implements ISubcomman
 			ITeamRepository repo = RepoUtil.loginUrlArgAncestor(config, client, destinationWsOption);
 			repo.setConnectionTimeout(timeout);
 
+			boolean workspacesCreated = false;
+			if (subargs.hasOption(MigrateToOptions.OPT_STREAM)) {
+				workspacesCreated = new WorkspaceProvisioner(repo, output).ensureWorkspaces(
+						subargs.getOption(MigrateToOptions.OPT_STREAM), subargs.getOption(MigrateToOptions.OPT_SRC_WS),
+						subargs.getOption(MigrateToOptions.OPT_DEST_WS));
+			}
+
 			IWorkspace sourceWs = RepoUtil.getWorkspace(sourceWsOption.getItemSelector(), true, false, repo, config);
 			IWorkspace destinationWs = RepoUtil.getWorkspace(destinationWsOption.getItemSelector(), true, false, repo,
 					config);
@@ -144,8 +155,23 @@ public abstract class MigrateTo extends AbstractSubcommand implements ISubcomman
 				sandboxDirectory = new File(System.getProperty("user.dir"));
 			}
 			Migrator migrator = getMigrator();
+			if (!listTagsOnly) {
+				report = new MigrationReport(sourceWsOption.getStringValue(), destinationWsOption.getStringValue());
+				reportDirectory = sandboxDirectory;
+			}
 			RtcCommands commands = new CliRtcCommands(config, output, connection,
-					destinationWsOption.getStringValue());
+					destinationWsOption.getStringValue(), sandboxDirectory.getAbsolutePath());
+			if (workspacesCreated) {
+				if (new File(sandboxDirectory, ".git").exists()) {
+					throw new IllegalStateException("The workspaces were just created but the sandbox "
+							+ sandboxDirectory + " already contains a git repository; use an empty directory");
+				}
+				sandboxDirectory.mkdirs();
+				int loaded = commands.load(null, false);
+				if (loaded != Constants.STATUS_OK.intValue()) {
+					throw new CLIClientException("Loading the new target workspace failed with status [" + loaded + "]");
+				}
+			}
 			// before the incoming change sets are computed: a change set discarded here must be incoming again
 			recoverInterruptedMigration(migrator, commands, sandboxDirectory,
 					getChangeSetHistory(repo, destinationWs, "target"));
@@ -200,6 +226,7 @@ public abstract class MigrateTo extends AbstractSubcommand implements ISubcomman
 			RtcMigrator rtcMigrator = new RtcMigrator(output, commands, migrator, sandboxDirectory,
 					destinationWsComponents.keySet(), isAcceptMissingChangeSets());
 			rtcMigrator.useChangeSetDetails(details, initialFiles);
+			rtcMigrator.setReport(report);
 			createSnapshotTags(migrator, snapshotPlacer.reached(Collections.<String> emptySet()));
 			boolean isFirstTag = true;
 			int numberOfTags = tagList.size();
@@ -227,9 +254,11 @@ public abstract class MigrateTo extends AbstractSubcommand implements ISubcomman
 				createSnapshotTags(migrator, snapshotPlacer.reached(tag.getBaselineUuids()));
 			}
 			for (SnapshotTag snapshot : snapshotPlacer.getWaiting()) {
-				output.writeLine("WARNING: " + snapshot + " was not tagged, not all of its baselines were migrated");
+				warn(snapshot + " was not tagged, not all of its baselines were migrated");
 			}
+			finishReport(null);
 		} catch (Throwable t) {
+			finishReport(t);
 			t.printStackTrace(output.getOutputStream());
 			throw new RuntimeException(t);
 		} finally {
@@ -241,6 +270,37 @@ public abstract class MigrateTo extends AbstractSubcommand implements ISubcomman
 		for (SnapshotTag snapshot : snapshots) {
 			output.writeLine("Tagging " + snapshot + " as [" + snapshot.getName() + "]");
 			migrator.createTag(snapshot);
+			if (report != null) {
+				report.tagged(snapshot);
+			}
+		}
+	}
+
+	private void warn(String message) {
+		output.writeLine("WARNING: " + message);
+		if (report != null) {
+			report.warning(message);
+		}
+	}
+
+	/**
+	 * Writes the report into the git directory of the sandbox; skipped if there is no repository yet (writing would
+	 * create one).
+	 */
+	private void finishReport(Throwable failure) {
+		if (report == null) {
+			return;
+		}
+		MigrationReport finished = report;
+		report = null;
+		finished.finished(failure);
+		if (!new File(reportDirectory, ".git/HEAD").isFile()) {
+			return;
+		}
+		try {
+			output.writeLine("Migration report: " + finished.write(reportDirectory));
+		} catch (IOException e) {
+			output.writeLine("WARNING: unable to write the migration report: " + e);
 		}
 	}
 
@@ -332,7 +392,7 @@ public abstract class MigrateTo extends AbstractSubcommand implements ISubcomman
 		}
 		ResumeAnalysis analysis = ResumeAnalysis.analyse(targetHistory, state.getMigrated(), state.getBase());
 		for (String component : analysis.getUndeterminedComponents()) {
-			output.writeLine("WARNING: cannot check component [" + component
+			warn("cannot check component [" + component
 					+ "] for change sets accepted by an interrupted run (no commit and no recorded start state)");
 		}
 		List<String> pending = analysis.getPending();
@@ -351,6 +411,9 @@ public abstract class MigrateTo extends AbstractSubcommand implements ISubcomman
 					+ "] with 'scm discard' or set resume.discard.pending=true, then run the migration again");
 		}
 		for (int i = pending.size() - 1; i >= 0; i--) {
+			if (report != null) {
+				report.changeSetDiscarded(pending.get(i));
+			}
 			int result = commands.discard(pending.get(i));
 			if (result != Constants.STATUS_OK.intValue()) {
 				throw new CLIClientException("Discarding change set [" + pending.get(i) + "] failed with status ["

@@ -100,6 +100,7 @@ public final class GitMigrator implements Migrator {
 	private Collection<FileProperties> propertiesBeforeInit;
 	private final Set<String> executablePaths = new TreeSet<String>();
 	private final Map<String, String> initialState = new TreeMap<String, String>();
+	private String lastCommitId;
 	static final String KEEP_FILE = ".gitkeep";
 	private boolean keepEmptyFolders;
 	// index-only placeholders for folders that are empty in EWM (never written to the sandbox)
@@ -258,6 +259,7 @@ public final class GitMigrator implements Migrator {
 	}
 
 	private void gitCommit(PersonIdent author, PersonIdent committer, String comment, boolean allowEmpty) {
+		lastCommitId = null;
 		try {
 			// add all untracked files
 			Status status = git.status().call();
@@ -307,8 +309,8 @@ public final class GitMigrator implements Migrator {
 			// ignored empty folder) does not produce a commit unless one commit per change set is wanted
 			if (!toAdd.isEmpty() || !toForce.isEmpty() || !toRemove.isEmpty() || allowEmpty || keepEmptyFolders) {
 				try {
-					git.commit().setMessage(comment).setAuthor(author).setCommitter(committer)
-							.setAllowEmpty(allowEmpty).call();
+					lastCommitId = git.commit().setMessage(comment).setAuthor(author).setCommitter(committer)
+							.setAllowEmpty(allowEmpty).call().getId().name();
 				} catch (EmptyCommitException e) {
 					// nothing changed
 				}
@@ -831,6 +833,11 @@ public final class GitMigrator implements Migrator {
 		} finally {
 			dirCache.unlock();
 		}
+	}
+
+	@Override
+	public String getLastCommitId() {
+		return lastCommitId;
 	}
 
 	@Override

@@ -63,6 +63,13 @@ Flow of one `scm migrate-to-git` run:
    - The root `.gitignore` holds the migration's own entries (`/.jazz5`, `/.metadata`, configured exclusions). A root `.jazzignore` only owns a marked block inside it; `.gitignore` files in subfolders are fully owned by their `.jazzignore`.
    - Ignored-but-present files are force-added (`ForceAddTreeIterator`), except scm metadata and configured exclusions, because only scm writes to the sandbox. It also applies JGit window-cache tuning and runs `git gc` every 1000 commits (`needsIntermediateCleanup`/`intermediateCleanup`).
 
+Phase 2 additions:
+- **File properties.** `ChangeSetDetails` / `ewm/EwmChangeSetDetails` (Java API) read the EWM properties of the touched items after every accept, into a `FilePropertiesModel` keyed by item ID. `GitMigrator.updateFileProperties` then writes a generated `.gitattributes` block (`GitattributesGenerator`), executable modes, and index-only `.gitkeep` entries (`keep.empty.folders`). This is what makes git byte-identical to `scm load`.
+- **Resume.** The initial commit stores `EWM-Base` trailers. `ResumeAnalysis` compares them, plus the `EWM-ChangeSet` trailers, with the target workspace history before the incoming change sets are computed, and discards accepted-but-uncommitted change sets.
+- **Snapshots.** These become `snapshot/<name>` tags (`SnapshotTag`, `SnapshotPlacer`); `EWM-Snapshot` and `EWM-Baseline` lines in the tag message identify them on reruns.
+- **Workspace setup.** `--stream` creates both workspaces (`ewm/WorkspaceProvisioner`) and loads the target.
+- **Report.** `MigrationReport` writes `.git/rtc2git/report-<time>.json` on every run that has a repository.
+
 Key seams:
 - `Migrator`, `ChangeSet`, `Tag` are the interfaces separating RTC-side logic from the git backend; tests for the git side (`GitMigrator*Test`, `IdentityResolverTest`, `util/*Test`) exercise these without RTC. `ChangeSet` and `Tag` have `default` methods for EWM-specific data (UUIDs, user ID, baseline UUIDs), so test doubles stay small.
 - RTC CLI commands are invoked in-process via `command/*CommandDelegate`, which builds an `scm` sub-command line, swaps it into the IBM `ClientConfiguration` via reflection, and restores the original afterwards.

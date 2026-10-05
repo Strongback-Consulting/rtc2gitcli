@@ -13,13 +13,15 @@ public class CliRtcCommands implements RtcCommands {
 	private final IChangeLogOutput output;
 	private final RtcConnection connection;
 	private final String workspace;
+	private final String sandboxDirectory;
 
 	public CliRtcCommands(IScmClientConfiguration config, IChangeLogOutput output, RtcConnection connection,
-			String workspace) {
+			String workspace, String sandboxDirectory) {
 		this.config = config;
 		this.output = output;
 		this.connection = connection;
 		this.workspace = workspace;
+		this.sandboxDirectory = sandboxDirectory;
 	}
 
 	@Override
@@ -40,6 +42,7 @@ public class CliRtcCommands implements RtcCommands {
 
 	@Override
 	public int load(String component, boolean force) throws CLIClientException {
-		return new LoadCommandDelegate(config, output, connection, workspace, component, force).run();
+		return new LoadCommandDelegate(config, output, connection, workspace, component, force, sandboxDirectory)
+				.run();
 	}
 }

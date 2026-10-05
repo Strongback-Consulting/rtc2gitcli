@@ -69,4 +69,11 @@ public interface Migrator {
 	default void setInitialState(Map<String, String> newestChangeSets) {
 	}
 
+	/**
+	 * @return the id of the commit created by the last {@link #commitChanges(ChangeSet)}, if any
+	 */
+	default String getLastCommitId() {
+		return null;
+	}
+
 }
