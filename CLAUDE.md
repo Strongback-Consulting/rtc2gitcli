@@ -45,18 +45,22 @@ uv run ewm2zbuilder <export.xml> -o out --schema <schema.json> [--sources-map ma
 
 Neither the IBM zBuilder schema nor any client export is committed. Tests find them through `EWM2ZBUILDER_SCHEMA` and `EWM2ZBUILDER_EXPORT`, or in the git-ignored `ewm2zbuilder/schema/` and `ewm2zbuilder/local/` folders, and skip when they are absent. This repo is public: never commit client system definitions, data set names, or generated output.
 
+End-to-end testing against a live EWM server is described in `docs/e2e-testing.md`.
+
 ## Architecture
 
 Flow of one `scm migrate-to-git` run:
 
 1. **`git/MigrateToGit`** (the registered subcommand) loads and trims `migration.properties`, builds the baseline-include regex and a `GitMigrator`, then delegates to the abstract base `MigrateTo.run()`. Options are declared in `MigrateToOptions` / `MigrateToGitOptions`.
-2. **`MigrateTo`** (VCS-agnostic driver) logs into RTC, collects all baselines of the source workspace's flow target into an `RtcTagList`, then computes an incoming change log (source stream vs. target workspace) and walks it with `HistoryEntryVisitor` to attach each `RtcChangeSet` (with its work items) to the baseline/tag it belongs to. The list is sorted by creation date, inactive and non-matching (`rtc.baseline.include`) tags are pruned, and an implicit HEAD tag catches change sets after the last baseline. Other options: `-t/--timeout` (RTC connection timeout, default 900s), `-L/--list-tags-only` (stop after printing tags), and `-U/--update` (update migration: skip a leading empty tag).
+2. **`MigrateTo`** (VCS-agnostic driver) logs into RTC, collects all baselines of the source workspace's flow target into an `RtcTagList`, then computes an incoming change log (source stream vs. target workspace) and walks it with `HistoryEntryVisitor` to attach each `RtcChangeSet` (with its work items) to the baseline/tag it belongs to.
+   - The change log lists change sets by creation date, which is not the order they were delivered. `MigrateTo.getChangeSetHistory` therefore reads each component's full history from the source workspace (`IChangeHistory`), and `RtcTag` accepts each component's change sets in that delivery order. Never drop or reorder change sets based on the change log alone. The list is sorted by creation date, inactive and non-matching (`rtc.baseline.include`) tags are pruned, and an implicit HEAD tag catches change sets after the last baseline. Other options: `-t/--timeout` (RTC connection timeout, default 900s), `-L/--list-tags-only` (stop after printing tags), and `-U/--update` (update migration: skip a leading empty tag).
 3. **`RtcMigrator`** iterates tags → change sets.
    - For each change set it runs `scm accept` on the target workspace through `command/RtcCommands`, loads newly seen components (by UUID), then calls `Migrator.commitChanges`. A change set already committed by an earlier run is accepted but not committed again.
    - Every status is checked. OUT_OF_SYNC leads to a forced reload and a second accept. A GAP stops the run unless `rtc.accept.missing.changesets=true`. Any other failure stops the run; never let a failed accept fall through to a commit.
    - After each tag it calls `Migrator.createTag` if the tag is to be created. It periodically deletes Eclipse local history under `.metadata` to save disk.
 4. **`git/GitMigrator`** (the only `Migrator` implementation, uses JGit) initializes the git repo in the sandbox, maintains root `.gitignore`/`.gitattributes`, translates `.jazzignore` files into `.gitignore` (`util/JazzignoreTranslator`), builds commit messages from changeset comment + work items (`util/CommitCommentTranslator`, `commit.message.*` / `rtc.workitem.*` properties), stages and commits with the RTC author/date (`IdentityResolver`: user mapping file, email domain, time zone), and creates annotated tags.
    - Each change set becomes exactly one commit, even an empty one, with an `EWM-ChangeSet: <uuid>` trailer. The trailers are the resume state: reopening an existing repository reads them (`isMigrated`) and refuses a dirty sandbox.
+   - The root `.gitignore` holds the migration's own entries (`/.jazz5`, `/.metadata`, configured exclusions). A root `.jazzignore` only owns a marked block inside it; `.gitignore` files in subfolders are fully owned by their `.jazzignore`.
    - Ignored-but-present files are force-added (`ForceAddTreeIterator`), except scm metadata and configured exclusions, because only scm writes to the sandbox. It also applies JGit window-cache tuning and runs `git gc` every 1000 commits (`needsIntermediateCleanup`/`intermediateCleanup`).
 
 Key seams:
