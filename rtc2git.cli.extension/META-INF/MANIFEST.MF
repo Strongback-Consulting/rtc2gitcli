@@ -22,7 +22,9 @@ Import-Package: com.ibm.team.filesystem.cli.client,
  com.ibm.team.repository.common.json,
  com.ibm.team.rtc.cli.infrastructure.internal.core,
  com.ibm.team.rtc.cli.infrastructure.internal.parser,
- com.ibm.team.rtc.cli.infrastructure.internal.parser.exceptions
+ com.ibm.team.rtc.cli.infrastructure.internal.parser.exceptions,
+ com.ibm.team.enterprise.systemdefinition.client;resolution:=optional,
+ com.ibm.team.enterprise.systemdefinition.common.model;resolution:=optional
 Bundle-ClassPath: .,
  lib/org.eclipse.jgit.jar,
  lib/JavaEWAH.jar,

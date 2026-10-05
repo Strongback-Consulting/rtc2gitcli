@@ -2,19 +2,15 @@ package to.rtc.cli.migrate;
 
 import java.io.File;
 import java.io.IOException;
-import java.io.OutputStreamWriter;
-import java.io.Writer;
-import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
-import java.util.Collection;
 import java.util.Date;
-import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.TimeZone;
+
+import to.rtc.cli.migrate.util.JsonWriter;
 
 /**
  * Machine readable record of one migration run (written as JSON).
@@ -112,10 +108,7 @@ public final class MigrationReport {
 		document.put("tags", tags);
 		document.put("discardedOnResume", discarded);
 		document.put("warnings", warnings);
-		try (Writer writer = new OutputStreamWriter(Files.newOutputStream(file.toPath()), StandardCharsets.UTF_8)) {
-			writeValue(writer, document, "");
-			writer.write('\n');
-		}
+		JsonWriter.write(file, document);
 		return file;
 	}
 
@@ -123,74 +116,5 @@ public final class MigrationReport {
 		SimpleDateFormat format = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'");
 		format.setTimeZone(TimeZone.getTimeZone("UTC"));
 		return format.format(new Date(millis));
-	}
-
-	static void writeValue(Writer writer, Object value, String indent) throws IOException {
-		if (value == null) {
-			writer.write("null");
-		} else if (value instanceof Number || value instanceof Boolean) {
-			writer.write(value.toString());
-		} else if (value instanceof Map) {
-			Iterator<? extends Map.Entry<?, ?>> it = ((Map<?, ?>) value).entrySet().iterator();
-			if (!it.hasNext()) {
-				writer.write("{}");
-				return;
-			}
-			writer.write("{\n");
-			while (it.hasNext()) {
-				Map.Entry<?, ?> entry = it.next();
-				writer.write(indent + "  ");
-				writeString(writer, String.valueOf(entry.getKey()));
-				writer.write(": ");
-				writeValue(writer, entry.getValue(), indent + "  ");
-				writer.write(it.hasNext() ? ",\n" : "\n");
-			}
-			writer.write(indent + "}");
-		} else if (value instanceof Collection) {
-			Iterator<?> it = ((Collection<?>) value).iterator();
-			if (!it.hasNext()) {
-				writer.write("[]");
-				return;
-			}
-			writer.write("[\n");
-			while (it.hasNext()) {
-				writer.write(indent + "  ");
-				writeValue(writer, it.next(), indent + "  ");
-				writer.write(it.hasNext() ? ",\n" : "\n");
-			}
-			writer.write(indent + "]");
-		} else {
-			writeString(writer, value.toString());
-		}
-	}
-
-	private static void writeString(Writer writer, String text) throws IOException {
-		StringBuilder sb = new StringBuilder("\"");
-		for (char c : text.toCharArray()) {
-			switch (c) {
-			case '"':
-				sb.append("\\\"");
-				break;
-			case '\\':
-				sb.append("\\\\");
-				break;
-			case '\n':
-				sb.append("\\n");
-				break;
-			case '\r':
-				sb.append("\\r");
-				break;
-			case '\t':
-				sb.append("\\t");
-				break;
-			default:
-				if (c < 0x20) {
-					sb.append(String.format("\\u%04x", Integer.valueOf(c)));
-				} else {
-					sb.append(c);
-				}
-			}
-		}
-		writer.write(sb.append('"').toString());
 	}
 }

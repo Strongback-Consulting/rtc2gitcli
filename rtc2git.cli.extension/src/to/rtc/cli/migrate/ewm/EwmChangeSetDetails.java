@@ -62,25 +62,35 @@ public class EwmChangeSetDetails implements ChangeSetDetails {
 		try {
 			List<FileProperties> all = new ArrayList<FileProperties>();
 			for (Object component : target.getComponents()) {
-				IConfiguration configuration = target.configuration((IComponentHandle) component);
-				Map<IVersionableHandle, String> paths = new HashMap<IVersionableHandle, String>();
-				collect(configuration, configuration.rootFolderHandle(monitor), "", paths);
-				List<IVersionableHandle> handles = new ArrayList<IVersionableHandle>(paths.keySet());
-				for (int i = 0; i < handles.size(); i += BATCH) {
-					List<IVersionableHandle> batch = handles.subList(i, Math.min(handles.size(), i + BATCH));
-					List<?> items = configuration.fetchCompleteItems(batch, monitor);
-					for (int j = 0; j < batch.size(); j++) {
-						IVersionable item = (IVersionable) items.get(j);
-						if (item != null) {
-							all.add(toProperties(item, paths.get(batch.get(j))));
-						}
-					}
-				}
+				all.addAll(readComponent((IComponentHandle) component));
 			}
 			return all;
 		} catch (TeamRepositoryException e) {
 			throw new RuntimeException("Unable to read the target workspace", e);
 		}
+	}
+
+	/**
+	 * @return the properties of every file and folder of the component in the workspace, with paths relative to the
+	 *         component root folder (the sandbox root)
+	 */
+	public List<FileProperties> readComponent(IComponentHandle component) throws TeamRepositoryException {
+		List<FileProperties> all = new ArrayList<FileProperties>();
+		IConfiguration configuration = target.configuration(component);
+		Map<IVersionableHandle, String> paths = new HashMap<IVersionableHandle, String>();
+		collect(configuration, configuration.rootFolderHandle(monitor), "", paths);
+		List<IVersionableHandle> handles = new ArrayList<IVersionableHandle>(paths.keySet());
+		for (int i = 0; i < handles.size(); i += BATCH) {
+			List<IVersionableHandle> batch = handles.subList(i, Math.min(handles.size(), i + BATCH));
+			List<?> items = configuration.fetchCompleteItems(batch, monitor);
+			for (int j = 0; j < batch.size(); j++) {
+				IVersionable item = (IVersionable) items.get(j);
+				if (item != null) {
+					all.add(toProperties(item, paths.get(batch.get(j))));
+				}
+			}
+		}
+		return all;
 	}
 
 	private void collect(IConfiguration configuration, IFolderHandle folder, String path,

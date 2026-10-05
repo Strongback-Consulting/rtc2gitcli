@@ -16,10 +16,11 @@ scm migrate-to-git -r <uri> -u <username> -P <password> -m <migration.properties
 
 ## Build and test
 
-Java code lives in `rtc2git.cli.extension/` (sources in `src/`, tests in `src_test/`). It is built with **Tycho 4** through the Maven wrapper at the repo root. The `com.ibm.team.*` dependencies are not on Maven Central. They come from a local **EWM 7.2 SCM Tools** install, which `ewm-7.2.target` uses as the target platform:
+Java code lives in `rtc2git.cli.extension/` (sources in `src/`, tests in `src_test/`). It is built with **Tycho 4** through the Maven wrapper at the repo root. The `com.ibm.team.*` dependencies are not on Maven Central. They come from a local **EWM 7.2 SCM Tools with Enterprise Extensions**, which `ewm-7.2.target` uses as the target platform. Plain SCM Tools lack the EE system definition bundles that `zos/EeSystemDefinitions` compiles against. Assemble the EE version once from the Build System Toolkit's Installation Manager repository:
 
 ```bash
-export SCMTOOLS_HOME=/path/to/jazz/scmtools          # folder containing eclipse/plugins
+tools/assemble-ee-scmtools.sh <offering-repo> <dest>/scmtools   # unzips the toolkit's SCM Tools + EE bundles
+export SCMTOOLS_HOME=<dest>/scmtools                  # folder containing eclipse/plugins
 ./mvnw verify                                         # compile, run all JUnit tests, package the bundle
 ./mvnw verify -pl rtc2git.cli.extension -Dtest=GitMigratorTest#testCommitChanges -Dsurefire.failIfNoSpecifiedTests=false
 ```
@@ -69,6 +70,11 @@ Phase 2 additions:
 - **Snapshots.** These become `snapshot/<name>` tags (`SnapshotTag`, `SnapshotPlacer`); `EWM-Snapshot` and `EWM-Baseline` lines in the tag message identify them on reruns.
 - **Workspace setup.** `--stream` creates both workspaces (`ewm/WorkspaceProvisioner`) and loads the target when none of its components is in the sandbox. scm fixes the sandbox root when the command starts (`initpolicy`), so a new sandbox needs `-d`; otherwise the in-process load registers it with a second daemon and fails.
 - **Report.** `MigrationReport` writes `.git/rtc2git/report-<time>.json` on every run that has a repository.
+
+z/OS (`zos/`, Phase 3 onward; the EE data model is in `docs/ewm-zos-model.md`):
+- **Properties.** Members and zFolders reference their language and data set definitions by UUID in user properties (`ZosProperties`), which `FileProperties` already carries.
+- **Resolving names.** `SystemDefinitions.create` returns `EeSystemDefinitions`, the only class that touches EE types, or an "unavailable" resolver when the optional EE imports are not wired (plain SCM Tools). Keep EE types out of every other class so that non-z/OS migrations run without EE.
+- **Inventory.** `scm migrate-inventory` (`ZosInventoryCmd`, a second subcommand in `plugin.xml`) is a read-only inventory of a stream; `ZosInventory` builds it and is unit-tested without a server.
 
 Key seams:
 - `Migrator`, `ChangeSet`, `Tag` are the interfaces separating RTC-side logic from the git backend; tests for the git side (`GitMigrator*Test`, `IdentityResolverTest`, `util/*Test`) exercise these without RTC. `ChangeSet` and `Tag` have `default` methods for EWM-specific data (UUIDs, user ID, baseline UUIDs), so test doubles stay small.
