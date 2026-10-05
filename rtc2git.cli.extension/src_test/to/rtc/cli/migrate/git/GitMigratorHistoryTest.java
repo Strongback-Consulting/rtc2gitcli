@@ -30,6 +30,7 @@ import org.junit.rules.TemporaryFolder;
 
 import to.rtc.cli.migrate.ChangeSet;
 import to.rtc.cli.migrate.ResumeState;
+import to.rtc.cli.migrate.SnapshotTag;
 import to.rtc.cli.migrate.Tag;
 import to.rtc.cli.migrate.util.Files;
 
@@ -233,6 +234,38 @@ public class GitMigratorHistoryTest {
 		migrator.createTag(tag("Week 1", 1L, "bl-1"));
 
 		assertEquals(Arrays.asList("refs/tags/Week_1"), tagNames());
+	}
+
+	@Test
+	public void testSnapshotAndBaselineTagsOnTheSameCommit() throws Exception {
+		migrator.init(basedir);
+		migrator.createTag(tag("Iteration 1", 1L, "bl-1", "bl-2"));
+		SnapshotTag snapshot = new SnapshotTag("snap-1", "Iteration 1", "snapshot/", 2L,
+				Arrays.asList("bl-1", "bl-2"));
+
+		migrator.createTag(snapshot);
+
+		assertEquals(Arrays.asList("refs/tags/Iteration_1", "refs/tags/snapshot/Iteration_1"), tagNames());
+		try (Git git = Git.open(basedir); RevWalk walk = new RevWalk(git.getRepository())) {
+			RevTag revTag = walk.parseTag(git.getRepository().exactRef("refs/tags/snapshot/Iteration_1").getObjectId());
+			assertTrue(revTag.getFullMessage().startsWith("EWM snapshot: Iteration 1"));
+			assertTrue(revTag.getFullMessage().contains(GitMigrator.SNAPSHOT_TRAILER + ": snap-1"));
+		}
+	}
+
+	@Test
+	public void testSnapshotTaggedOnceAcrossRunsAndDoesNotHideBaselines() throws Exception {
+		migrator.init(basedir);
+		migrator.createTag(new SnapshotTag("snap-1", "R1", "snapshot/", 2L, Arrays.asList("bl-1")));
+		migrator.close();
+
+		migrator = new GitMigrator(props);
+		migrator.init(basedir);
+		migrator.createTag(new SnapshotTag("snap-1", "R1", "snapshot/", 2L, Arrays.asList("bl-1")));
+		// the baseline itself was not tagged yet: the snapshot must not suppress it
+		migrator.createTag(tag("R1", 1L, "bl-1"));
+
+		assertEquals(Arrays.asList("refs/tags/R1", "refs/tags/snapshot/R1"), tagNames());
 	}
 
 	private List<String> tagNames() throws Exception {

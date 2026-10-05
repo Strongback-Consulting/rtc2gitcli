@@ -40,6 +40,16 @@ public class MigrateToGit extends MigrateTo {
 	}
 
 	@Override
+	protected Pattern getSnapshotIncludePattern() {
+		return Pattern.compile(migrationProperties.getProperty("rtc.snapshot.include", ""));
+	}
+
+	@Override
+	protected String getSnapshotTagPrefix() {
+		return migrationProperties.getProperty("rtc.snapshot.tag.prefix", "snapshot/");
+	}
+
+	@Override
 	protected boolean isDiscardPendingChangeSets() {
 		return Boolean.parseBoolean(migrationProperties.getProperty("resume.discard.pending", "true"));
 	}

@@ -4,9 +4,14 @@ import java.io.File;
 import java.lang.reflect.Field;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.Date;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.regex.Pattern;
 
 import org.eclipse.core.runtime.IProgressMonitor;
@@ -55,7 +60,10 @@ import com.ibm.team.scm.client.IWorkspaceManager;
 import com.ibm.team.scm.client.SCMPlatform;
 import com.ibm.team.scm.client.IChangeHistory;
 import com.ibm.team.scm.common.IChangeHistoryEntryChange;
+import com.ibm.team.scm.common.IBaselineHandle;
+import com.ibm.team.scm.common.IBaselineSet;
 import com.ibm.team.scm.common.IChangeSetHandle;
+import com.ibm.team.scm.common.dto.IBaselineSetSearchCriteria;
 import com.ibm.team.scm.common.IComponent;
 import com.ibm.team.scm.common.IComponentHandle;
 import com.ibm.team.scm.common.IWorkspace;
@@ -161,6 +169,17 @@ public abstract class MigrateTo extends AbstractSubcommand implements ISubcomman
 
 			tagList.printTagList(true);
 
+			List<SnapshotTag> snapshots = readSnapshots(repo, sourceWs);
+			Set<String> tagBaselines = new HashSet<String>();
+			for (RtcTag tag : tagList) {
+				tagBaselines.addAll(tag.getBaselineUuids());
+			}
+			SnapshotPlacer snapshotPlacer = new SnapshotPlacer(snapshots, tagBaselines);
+			for (SnapshotTag snapshot : snapshots) {
+				output.writeLine("  Snapshot [" + snapshot.getOriginalName() + "] created at ["
+						+ new Date(snapshot.getCreationDate()) + "] will be tagged as [" + snapshot.getName() + "]");
+			}
+
 			if (listTagsOnly) {
 				// Stop here before migration of any data
 				return;
@@ -181,6 +200,7 @@ public abstract class MigrateTo extends AbstractSubcommand implements ISubcomman
 			RtcMigrator rtcMigrator = new RtcMigrator(output, commands, migrator, sandboxDirectory,
 					destinationWsComponents.keySet(), isAcceptMissingChangeSets());
 			rtcMigrator.useChangeSetDetails(details, initialFiles);
+			createSnapshotTags(migrator, snapshotPlacer.reached(Collections.<String> emptySet()));
 			boolean isFirstTag = true;
 			int numberOfTags = tagList.size();
 			int tagCounter = 0;
@@ -188,6 +208,7 @@ public abstract class MigrateTo extends AbstractSubcommand implements ISubcomman
 				if (isUpdateMigration && isFirstTag && tag.isEmpty()) {
 					output.writeLine("Ignore migration of tag [" + tag.toString() + "] because it is empty.");
 					tagCounter++;
+					createSnapshotTags(migrator, snapshotPlacer.reached(tag.getBaselineUuids()));
 					continue;
 				}
 				isFirstTag = false;
@@ -203,6 +224,10 @@ public abstract class MigrateTo extends AbstractSubcommand implements ISubcomman
 				}
 				output.writeLine("Migration of tag [" + tag.getName() + "] [" + (tagCounter) + "/" + numberOfTags
 						+ "] took [" + (System.currentTimeMillis() - startTag) / 1000 + "] s");
+				createSnapshotTags(migrator, snapshotPlacer.reached(tag.getBaselineUuids()));
+			}
+			for (SnapshotTag snapshot : snapshotPlacer.getWaiting()) {
+				output.writeLine("WARNING: " + snapshot + " was not tagged, not all of its baselines were migrated");
 			}
 		} catch (Throwable t) {
 			t.printStackTrace(output.getOutputStream());
@@ -210,6 +235,63 @@ public abstract class MigrateTo extends AbstractSubcommand implements ISubcomman
 		} finally {
 			output.writeLine("Migration took [" + (System.currentTimeMillis() - start) / 1000 + "] s");
 		}
+	}
+
+	private void createSnapshotTags(Migrator migrator, List<SnapshotTag> snapshots) {
+		for (SnapshotTag snapshot : snapshots) {
+			output.writeLine("Tagging " + snapshot + " as [" + snapshot.getName() + "]");
+			migrator.createTag(snapshot);
+		}
+	}
+
+	/**
+	 * @return snapshot tag names are this prefix plus the snapshot name
+	 */
+	protected String getSnapshotTagPrefix() {
+		return "snapshot/";
+	}
+
+	/**
+	 * @return the snapshots of the stream to tag (by name); by default none
+	 */
+	protected Pattern getSnapshotIncludePattern() {
+		return Pattern.compile("");
+	}
+
+	/**
+	 * Reads the snapshots owned by the stream the source workspace flows with, oldest first.
+	 */
+	List<SnapshotTag> readSnapshots(ITeamRepository repo, IWorkspace sourceWs) throws TeamRepositoryException {
+		IProgressMonitor monitor = getMonitor();
+		IWorkspaceManager workspaceManager = SCMPlatform.getWorkspaceManager(repo);
+		IWorkspaceConnection sourceWsConnection = workspaceManager.getWorkspaceConnection(sourceWs, monitor);
+		IWorkspaceHandle stream = (IWorkspaceHandle) sourceWsConnection.getFlowTable().getCurrentAcceptFlow()
+				.getFlowNode();
+		IBaselineSetSearchCriteria criteria = IBaselineSetSearchCriteria.FACTORY.newInstance()
+				.setOwnerWorkspaceOptional(stream);
+		List<?> handles = workspaceManager.findBaselineSets(criteria, Integer.MAX_VALUE, monitor);
+		List<?> sets = repo.itemManager().fetchCompleteItems(handles, IItemManager.DEFAULT, monitor);
+		Pattern include = getSnapshotIncludePattern();
+		List<SnapshotTag> snapshots = new ArrayList<SnapshotTag>();
+		for (Object object : sets) {
+			IBaselineSet set = (IBaselineSet) object;
+			if (set == null || !include.matcher(set.getName()).matches()) {
+				continue;
+			}
+			List<String> baselines = new ArrayList<String>();
+			for (Object baseline : set.getBaselines()) {
+				baselines.add(((IBaselineHandle) baseline).getItemId().getUuidValue());
+			}
+			snapshots.add(new SnapshotTag(set.getItemId().getUuidValue(), set.getName(), getSnapshotTagPrefix(),
+					set.getCreationDate().getTime(), baselines));
+		}
+		Collections.sort(snapshots, new Comparator<SnapshotTag>() {
+			@Override
+			public int compare(SnapshotTag a, SnapshotTag b) {
+				return Long.compare(a.getCreationDate(), b.getCreationDate());
+			}
+		});
+		return snapshots;
 	}
 
 	private void setStdOut() {

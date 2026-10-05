@@ -74,6 +74,7 @@ public final class GitMigrator implements Migrator {
 	static final String CHANGE_SET_TRAILER = "EWM-ChangeSet";
 	static final String BASELINE_TRAILER = "EWM-Baseline";
 	static final String BASE_TRAILER = "EWM-Base";
+	static final String SNAPSHOT_TRAILER = "EWM-Snapshot";
 	static final Pattern VALUE_PATTERN = Pattern.compile("^([0-9]+) *(m|mb|k|kb|)$", Pattern.CASE_INSENSITIVE);
 
 	private Charset defaultCharset;
@@ -105,6 +106,8 @@ public final class GitMigrator implements Migrator {
 	private final Set<String> keepFiles = new TreeSet<String>();
 	// UUIDs of the EWM baselines that already have a tag (read from the tag messages)
 	private Set<String> taggedBaselines;
+	// UUIDs of the EWM snapshots that already have a tag
+	private Set<String> taggedSnapshots;
 
 	public GitMigrator(Properties properties) {
 		ignoredFileExtensions = new HashSet<String>();
@@ -901,10 +904,16 @@ public final class GitMigrator implements Migrator {
 		}
 		try {
 			Repository repository = git.getRepository();
-			for (String baseline : tag.getBaselineUuids()) {
-				if (getTaggedBaselines().contains(baseline)) {
-					// tagged by an earlier run
-					return;
+			String snapshot = tag.getSnapshotUuid();
+			if (snapshot != null) {
+				if (getTaggedSnapshots().contains(snapshot)) {
+					return; // tagged by an earlier run
+				}
+			} else {
+				for (String baseline : tag.getBaselineUuids()) {
+					if (getTaggedBaselines().contains(baseline)) {
+						return; // tagged by an earlier run
+					}
 				}
 			}
 			ObjectId head = repository.resolve(Constants.HEAD);
@@ -920,16 +929,24 @@ public final class GitMigrator implements Migrator {
 			}
 			long created = tag.getCreationDate();
 			Instant when = (created <= 0 || created == Long.MAX_VALUE) ? Instant.now() : Instant.ofEpochMilli(created);
-			StringBuilder message = new StringBuilder("EWM baseline: ").append(tag.getOriginalName());
-			if (!tag.getBaselineUuids().isEmpty()) {
+			StringBuilder message = new StringBuilder(snapshot != null ? "EWM snapshot: " : "EWM baseline: ")
+					.append(tag.getOriginalName());
+			if (snapshot != null || !tag.getBaselineUuids().isEmpty()) {
 				message.append('\n');
+				if (snapshot != null) {
+					message.append('\n').append(SNAPSHOT_TRAILER).append(": ").append(snapshot);
+				}
 				for (String uuid : tag.getBaselineUuids()) {
 					message.append('\n').append(BASELINE_TRAILER).append(": ").append(uuid);
 				}
 			}
 			git.tag().setName(name).setAnnotated(true).setMessage(message.toString())
 					.setTagger(new PersonIdent(defaultIdent, when, identities.getZoneId())).call();
-			getTaggedBaselines().addAll(tag.getBaselineUuids());
+			if (snapshot != null) {
+				getTaggedSnapshots().add(snapshot);
+			} else {
+				getTaggedBaselines().addAll(tag.getBaselineUuids());
+			}
 		} catch (RuntimeException e) {
 			throw e;
 		} catch (Exception e) {
@@ -938,23 +955,48 @@ public final class GitMigrator implements Migrator {
 	}
 
 	private Set<String> getTaggedBaselines() throws IOException {
-		if (taggedBaselines == null) {
-			taggedBaselines = new HashSet<String>();
-			Repository repository = git.getRepository();
-			try (RevWalk walk = new RevWalk(repository)) {
-				for (Ref ref : repository.getRefDatabase().getRefsByPrefix(Constants.R_TAGS)) {
-					RevObject object = walk.parseAny(ref.getObjectId());
-					if (object instanceof RevTag) {
-						for (String line : ((RevTag) object).getFullMessage().split("\n")) {
-							if (line.startsWith(BASELINE_TRAILER + ": ")) {
-								taggedBaselines.add(line.substring(BASELINE_TRAILER.length() + 2).trim());
-							}
-						}
+		readTagTrailers();
+		return taggedBaselines;
+	}
+
+	private Set<String> getTaggedSnapshots() throws IOException {
+		readTagTrailers();
+		return taggedSnapshots;
+	}
+
+	/**
+	 * Reads which baselines and snapshots the existing tags represent (the baselines listed in a snapshot tag do not
+	 * count as tagged baselines).
+	 */
+	private void readTagTrailers() throws IOException {
+		if (taggedBaselines != null) {
+			return;
+		}
+		taggedBaselines = new HashSet<String>();
+		taggedSnapshots = new HashSet<String>();
+		Repository repository = git.getRepository();
+		try (RevWalk walk = new RevWalk(repository)) {
+			for (Ref ref : repository.getRefDatabase().getRefsByPrefix(Constants.R_TAGS)) {
+				RevObject object = walk.parseAny(ref.getObjectId());
+				if (!(object instanceof RevTag)) {
+					continue;
+				}
+				Set<String> baselines = new HashSet<String>();
+				String snapshot = null;
+				for (String line : ((RevTag) object).getFullMessage().split("\n")) {
+					if (line.startsWith(BASELINE_TRAILER + ": ")) {
+						baselines.add(line.substring(BASELINE_TRAILER.length() + 2).trim());
+					} else if (line.startsWith(SNAPSHOT_TRAILER + ": ")) {
+						snapshot = line.substring(SNAPSHOT_TRAILER.length() + 2).trim();
 					}
+				}
+				if (snapshot != null) {
+					taggedSnapshots.add(snapshot);
+				} else {
+					taggedBaselines.addAll(baselines);
 				}
 			}
 		}
-		return taggedBaselines;
 	}
 
 	private static ObjectId peeled(Repository repository, Ref ref) throws IOException {

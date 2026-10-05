@@ -41,4 +41,13 @@ public interface Tag {
 	default Collection<String> getBaselineUuids() {
 		return Collections.emptyList();
 	}
+
+	/**
+	 * Returns the UUID of the EWM snapshot if this tag represents one.
+	 *
+	 * @return the snapshot UUID or <code>null</code> for a baseline tag
+	 */
+	default String getSnapshotUuid() {
+		return null;
+	}
 }
