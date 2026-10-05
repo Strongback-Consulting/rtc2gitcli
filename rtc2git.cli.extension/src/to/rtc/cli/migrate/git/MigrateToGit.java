@@ -40,6 +40,11 @@ public class MigrateToGit extends MigrateTo {
 	}
 
 	@Override
+	protected boolean isDiscardPendingChangeSets() {
+		return Boolean.parseBoolean(migrationProperties.getProperty("resume.discard.pending", "true"));
+	}
+
+	@Override
 	protected boolean isAcceptMissingChangeSets() {
 		return Boolean.parseBoolean(migrationProperties.getProperty("rtc.accept.missing.changesets", "false"));
 	}

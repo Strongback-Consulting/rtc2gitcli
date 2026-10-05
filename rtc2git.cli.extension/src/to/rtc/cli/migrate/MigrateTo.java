@@ -19,6 +19,7 @@ import to.rtc.cli.migrate.ewm.EwmChangeSetDetails;
 
 import com.ibm.team.filesystem.cli.client.AbstractSubcommand;
 import com.ibm.team.filesystem.cli.core.internal.ScmCommandLineArgument;
+import com.ibm.team.filesystem.cli.core.Constants;
 import com.ibm.team.filesystem.cli.core.subcommands.CommonOptions;
 import com.ibm.team.filesystem.cli.core.util.RepoUtil;
 import com.ibm.team.filesystem.cli.core.util.RepoUtil.ItemType;
@@ -128,6 +129,19 @@ public abstract class MigrateTo extends AbstractSubcommand implements ISubcomman
 			IWorkspace destinationWs = RepoUtil.getWorkspace(destinationWsOption.getItemSelector(), true, false, repo,
 					config);
 
+			final File sandboxDirectory;
+			if (subargs.hasOption(CommonOptions.OPT_DIRECTORY)) {
+				sandboxDirectory = new File(subargs.getOption(CommonOptions.OPT_DIRECTORY));
+			} else {
+				sandboxDirectory = new File(System.getProperty("user.dir"));
+			}
+			Migrator migrator = getMigrator();
+			RtcCommands commands = new CliRtcCommands(config, output, connection,
+					destinationWsOption.getStringValue());
+			// before the incoming change sets are computed: a change set discarded here must be incoming again
+			recoverInterruptedMigration(migrator, commands, sandboxDirectory,
+					getChangeSetHistory(repo, destinationWs, "target"));
+
 			output.writeLine("Get full history information from RTC. This could take a large amount of time.");
 			output.writeLine("Create the list of baselines");
 			RtcTagList tagList = createTagListFromBaselines(client, repo, sourceWs);
@@ -152,14 +166,7 @@ public abstract class MigrateTo extends AbstractSubcommand implements ISubcomman
 				return;
 			}
 
-			final File sandboxDirectory;
 			output.writeLine("Start migration of tags.");
-			if (subargs.hasOption(CommonOptions.OPT_DIRECTORY)) {
-				sandboxDirectory = new File(subargs.getOption(CommonOptions.OPT_DIRECTORY));
-			} else {
-				sandboxDirectory = new File(System.getProperty("user.dir"));
-			}
-			Migrator migrator = getMigrator();
 			// file properties of what is already in the sandbox, so that the initial commit gets them too
 			ChangeSetDetails details = new EwmChangeSetDetails(repo, destinationWs);
 			Collection<FileProperties> initialFiles = details.readAll();
@@ -171,8 +178,6 @@ public abstract class MigrateTo extends AbstractSubcommand implements ISubcomman
 					destinationWs.getItemId().getUuidValue(), new PathLocation(sandboxDirectory.getAbsolutePath()),
 					client, config);
 
-			RtcCommands commands = new CliRtcCommands(config, output, connection,
-					destinationWsOption.getStringValue());
 			RtcMigrator rtcMigrator = new RtcMigrator(output, commands, migrator, sandboxDirectory,
 					destinationWsComponents.keySet(), isAcceptMissingChangeSets());
 			rtcMigrator.useChangeSetDetails(details, initialFiles);
@@ -221,12 +226,64 @@ public abstract class MigrateTo extends AbstractSubcommand implements ISubcomman
 	}
 
 	/**
+	 * @return whether change sets that an interrupted run accepted but did not commit are discarded automatically
+	 */
+	protected boolean isDiscardPendingChangeSets() {
+		return true;
+	}
+
+	/**
+	 * A run that stopped between accepting a change set and committing it leaves the change set in the target
+	 * workspace; it would not be incoming any more and so be missing in git. Such change sets are discarded again.
+	 */
+	private void recoverInterruptedMigration(Migrator migrator, RtcCommands commands, File sandboxDirectory,
+			Map<String, List<String>> targetHistory) throws CLIClientException {
+		ResumeState state = migrator.inspectResume(sandboxDirectory);
+		if (!state.isResume()) {
+			Map<String, String> newest = new HashMap<String, String>();
+			for (Map.Entry<String, List<String>> component : targetHistory.entrySet()) {
+				List<String> history = component.getValue();
+				newest.put(component.getKey(), history.isEmpty() ? "" : history.get(history.size() - 1));
+			}
+			migrator.setInitialState(newest);
+			return;
+		}
+		ResumeAnalysis analysis = ResumeAnalysis.analyse(targetHistory, state.getMigrated(), state.getBase());
+		for (String component : analysis.getUndeterminedComponents()) {
+			output.writeLine("WARNING: cannot check component [" + component
+					+ "] for change sets accepted by an interrupted run (no commit and no recorded start state)");
+		}
+		List<String> pending = analysis.getPending();
+		if (pending.isEmpty()) {
+			output.writeLine("Resuming: the target workspace matches the git history");
+			return;
+		}
+		output.writeLine("Resuming: " + pending.size()
+				+ " change set(s) were accepted by an interrupted run but not committed: " + pending);
+		if (listTagsOnly) {
+			output.writeLine("They would be discarded from the target workspace before migrating (not in list mode)");
+			return;
+		}
+		if (!isDiscardPendingChangeSets()) {
+			throw new CLIClientException("Discard these change sets from workspace [" + commands.getWorkspace()
+					+ "] with 'scm discard' or set resume.discard.pending=true, then run the migration again");
+		}
+		for (int i = pending.size() - 1; i >= 0; i--) {
+			int result = commands.discard(pending.get(i));
+			if (result != Constants.STATUS_OK.intValue()) {
+				throw new CLIClientException("Discarding change set [" + pending.get(i) + "] failed with status ["
+						+ result + "]");
+			}
+		}
+	}
+
+	/**
 	 * Reads the complete change history of every component of the source workspace, oldest change set first. This
 	 * is the order in which the change sets were delivered, which can differ from their creation order.
 	 *
 	 * @return component UUID -> change set UUIDs in delivery order
 	 */
-	Map<String, List<String>> getChangeSetHistory(ITeamRepository repo, IWorkspace sourceWs)
+	Map<String, List<String>> getChangeSetHistory(ITeamRepository repo, IWorkspace sourceWs, String label)
 			throws TeamRepositoryException {
 		IWorkspaceManager workspaceManager = SCMPlatform.getWorkspaceManager(repo);
 		IItemManager itemManager = repo.itemManager();
@@ -255,7 +312,7 @@ public abstract class MigrateTo extends AbstractSubcommand implements ISubcomman
 				ordered.addAll(page);
 			}
 			history.put(component.getItemId().getUuidValue(), ordered);
-			output.writeLine("History of component [" + component.getName() + "]: " + ordered.size()
+			output.writeLine("History of " + label + " component [" + component.getName() + "]: " + ordered.size()
 					+ " change sets" + (ordered.isEmpty() ? ""
 							: ", oldest [" + ordered.get(0) + "], newest [" + ordered.get(ordered.size() - 1) + "]"));
 		}
@@ -342,7 +399,8 @@ public abstract class MigrateTo extends AbstractSubcommand implements ISubcomman
 			output.writeLine("Get list of baselines and changesets form RTC took ["
 					+ (System.currentTimeMillis() - startTime) / 1000 + "]s.");
 			output.writeLine("Parse the list of baselines and changesets.");
-			HistoryEntryVisitor visitor = new HistoryEntryVisitor(tagList, getChangeSetHistory(repo, sourceWs),
+			HistoryEntryVisitor visitor = new HistoryEntryVisitor(tagList,
+					getChangeSetHistory(repo, sourceWs, "source"),
 					new ChangeLogStreamOutput(config.getContext().stdout()));
 
 			startTime = System.currentTimeMillis();

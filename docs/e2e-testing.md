@@ -25,10 +25,10 @@ Checks:
   - Line endings, unless `git.config.core.autocrlf=false` is set. Files stored with CRLF in EWM are normalised to LF.
   - Empty folders. Git does not store them.
 - Shared baseline names across components become one tag. Rerunning never creates `<tag>_2`.
-- Resume: kill the run with `kill -9` partway, then rerun.
-  - If the sandbox is dirty, the run refuses to start.
-  - To recover, find the change set that is in the target workspace but in no commit trailer (exclude the Initial Baseline's change sets), then run `scm discard -w <target> <uuid>`. Without `-N`, this also restores the files.
-  - Rerun. The final tree and the commit sequence must equal those of an uninterrupted run.
+- Resume: kill the run with `kill -9` partway, then simply rerun it.
+  - The rerun must report `Resuming: N change set(s) were accepted by an interrupted run but not committed` and discard them itself.
+  - The final tree and the commit sequence must equal those of an uninterrupted run.
+  - The start state comes from the `EWM-Base` trailers of the initial commit. A repository created before Phase 2 has no such trailers: components without a commit are then reported as not checkable.
 
 ## Resetting the target for another run
 

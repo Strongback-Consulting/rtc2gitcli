@@ -2,6 +2,7 @@ package to.rtc.cli.migrate;
 
 import java.io.File;
 import java.util.Collection;
+import java.util.Map;
 
 /**
  * @author florian.buehlmann
@@ -49,6 +50,23 @@ public interface Migrator {
 	 *            all files and folders with their current paths
 	 */
 	default void updateFileProperties(Collection<FileProperties> files) {
+	}
+
+	/**
+	 * Reads, without changing anything, what an earlier migration left in the sandbox.
+	 */
+	default ResumeState inspectResume(File sandboxRootDirectory) {
+		return ResumeState.NEW;
+	}
+
+	/**
+	 * For a new migration: the newest change set of each target component before anything is accepted, recorded so
+	 * an interrupted run can later be recovered (see {@link ResumeAnalysis}).
+	 *
+	 * @param newestChangeSets
+	 *            component UUID -> change set UUID ("" for a component without change sets)
+	 */
+	default void setInitialState(Map<String, String> newestChangeSets) {
 	}
 
 }

@@ -21,4 +21,9 @@ public interface RtcCommands {
 	 *            component UUID or name, or <code>null</code> for the whole workspace
 	 */
 	int load(String component, boolean force) throws CLIClientException;
+
+	/**
+	 * Removes the change set from the target workspace and restores the sandbox files.
+	 */
+	int discard(String changeSetUuid) throws CLIClientException;
 }

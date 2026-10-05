@@ -13,7 +13,10 @@ import java.util.HashSet;
 import java.util.Iterator;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Map.Entry;
+import java.util.TreeMap;
+import java.util.HashMap;
 import java.util.Properties;
 import java.util.Set;
 import java.util.SortedSet;
@@ -51,6 +54,7 @@ import to.rtc.cli.migrate.ChangeSet;
 import to.rtc.cli.migrate.ChangeSet.WorkItem;
 import to.rtc.cli.migrate.FileProperties;
 import to.rtc.cli.migrate.Migrator;
+import to.rtc.cli.migrate.ResumeState;
 import to.rtc.cli.migrate.Tag;
 import to.rtc.cli.migrate.util.CommitCommentTranslator;
 import to.rtc.cli.migrate.util.Files;
@@ -69,6 +73,7 @@ public final class GitMigrator implements Migrator {
 	static final Pattern JAZZIGNORE_PATTERN = Pattern.compile("(^.*(/|))\\.jazzignore$");
 	static final String CHANGE_SET_TRAILER = "EWM-ChangeSet";
 	static final String BASELINE_TRAILER = "EWM-Baseline";
+	static final String BASE_TRAILER = "EWM-Base";
 	static final Pattern VALUE_PATTERN = Pattern.compile("^([0-9]+) *(m|mb|k|kb|)$", Pattern.CASE_INSENSITIVE);
 
 	private Charset defaultCharset;
@@ -93,6 +98,7 @@ public final class GitMigrator implements Migrator {
 	private GitattributesGenerator attributesGenerator;
 	private Collection<FileProperties> propertiesBeforeInit;
 	private final Set<String> executablePaths = new TreeSet<String>();
+	private final Map<String, String> initialState = new TreeMap<String, String>();
 	static final String KEEP_FILE = ".gitkeep";
 	private boolean keepEmptyFolders;
 	// index-only placeholders for folders that are empty in EWM (never written to the sandbox)
@@ -613,8 +619,20 @@ public final class GitMigrator implements Migrator {
 			initConfig();
 			boolean resumed = git.getRepository().resolve(Constants.HEAD) != null;
 			PersonIdent now = new PersonIdent(defaultIdent, Instant.now(), identities.getZoneId());
-			gitCommit(now, now, resumed ? "Update generated files before resuming the migration" : "Initial commit",
-					false);
+			if (resumed) {
+				gitCommit(now, now, "Update generated files before resuming the migration", false);
+			} else {
+				StringBuilder message = new StringBuilder("Initial commit");
+				if (!initialState.isEmpty()) {
+					// start state of the target workspace, read when resuming an interrupted run
+					message.append('\n');
+					for (Map.Entry<String, String> component : initialState.entrySet()) {
+						message.append('\n').append(BASE_TRAILER).append(": ").append(component.getKey()).append('=')
+								.append(component.getValue());
+					}
+				}
+				gitCommit(now, now, message.toString(), !initialState.isEmpty());
+			}
 		} catch (IOException e) {
 			throw new RuntimeException("Unable to initialize GIT repository", e);
 		} catch (GitAPIException e) {
@@ -809,6 +827,38 @@ public final class GitMigrator implements Migrator {
 			}
 		} finally {
 			dirCache.unlock();
+		}
+	}
+
+	@Override
+	public void setInitialState(Map<String, String> newestChangeSets) {
+		initialState.clear();
+		initialState.putAll(newestChangeSets);
+	}
+
+	@Override
+	public ResumeState inspectResume(File sandboxRootDirectory) {
+		if (!new File(sandboxRootDirectory, ".git").exists()) {
+			return ResumeState.NEW;
+		}
+		try (Git existing = Git.open(sandboxRootDirectory)) {
+			if (existing.getRepository().resolve(Constants.HEAD) == null) {
+				return ResumeState.NEW;
+			}
+			Set<String> migrated = new HashSet<String>();
+			Map<String, String> base = new HashMap<String, String>();
+			for (RevCommit commit : existing.log().call()) {
+				migrated.addAll(commit.getFooterLines(CHANGE_SET_TRAILER));
+				for (String line : commit.getFooterLines(BASE_TRAILER)) {
+					int equals = line.indexOf('=');
+					if (equals > 0) {
+						base.put(line.substring(0, equals).trim(), line.substring(equals + 1).trim());
+					}
+				}
+			}
+			return new ResumeState(true, migrated, base);
+		} catch (IOException | GitAPIException e) {
+			throw new RuntimeException("Unable to read the git history of " + sandboxRootDirectory, e);
 		}
 	}
 

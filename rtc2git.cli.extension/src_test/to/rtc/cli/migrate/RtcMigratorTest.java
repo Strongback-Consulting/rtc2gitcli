@@ -274,6 +274,12 @@ public class RtcMigratorTest {
 		}
 
 		@Override
+		public int discard(String changeSetUuid) {
+			calls.add("discard " + changeSetUuid);
+			return OK;
+		}
+
+		@Override
 		public int load(String component, boolean force) {
 			calls.add("load " + (component == null ? "(all)" : component) + (force ? " --force" : ""));
 			return loadResults.remove();

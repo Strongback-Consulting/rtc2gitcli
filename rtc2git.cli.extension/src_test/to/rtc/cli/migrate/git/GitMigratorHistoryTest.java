@@ -11,6 +11,8 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.List;
 import java.util.Properties;
 
@@ -27,6 +29,7 @@ import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
 
 import to.rtc.cli.migrate.ChangeSet;
+import to.rtc.cli.migrate.ResumeState;
 import to.rtc.cli.migrate.Tag;
 import to.rtc.cli.migrate.util.Files;
 
@@ -132,6 +135,25 @@ public class GitMigratorHistoryTest {
 		} catch (IllegalStateException e) {
 			assertTrue(e.getMessage(), e.getMessage().contains("a.txt"));
 		}
+	}
+
+	@Test
+	public void testInitialCommitRecordsStartStateForResume() throws Exception {
+		Map<String, String> start = new HashMap<String, String>();
+		start.put("comp-a", "cs-0");
+		start.put("comp-b", "");
+		assertFalse(migrator.inspectResume(basedir).isResume());
+		migrator.setInitialState(start);
+		migrator.init(basedir);
+		write("a.txt", "a");
+		migrator.commitChanges(changeSet("cs-1", "first"));
+		migrator.close();
+
+		ResumeState state = new GitMigrator(props).inspectResume(basedir);
+
+		assertTrue(state.isResume());
+		assertEquals(start, state.getBase());
+		assertEquals(Collections.singleton("cs-1"), state.getMigrated());
 	}
 
 	@Test

@@ -34,6 +34,11 @@ public class CliRtcCommands implements RtcCommands {
 	}
 
 	@Override
+	public int discard(String changeSetUuid) throws CLIClientException {
+		return new DiscardCommandDelegate(config, output, connection, workspace, changeSetUuid).run();
+	}
+
+	@Override
 	public int load(String component, boolean force) throws CLIClientException {
 		return new LoadCommandDelegate(config, output, connection, workspace, component, force).run();
 	}
