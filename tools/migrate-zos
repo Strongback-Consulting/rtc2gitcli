@@ -1,44 +1,51 @@
 #!/bin/sh
-# Migrates one EWM z/OS stream into a Git repository for DBB zBuilder.
+# Migrates EWM z/OS streams into a Git repository for DBB zBuilder, one branch per stream.
 #
-# Usage: tools/migrate-zos -r <repo> -s <stream> -x <sysdef-export.xml> -w <work-dir> -t <target-repo>
-#                          [-m <migration.properties>] [-c <schema.json>] [-S <source-ws>] [-T <target-ws>]
+# Usage: tools/migrate-zos -r <repo> -s <stream>[=<branch>] [-s <stream>[=<branch>] ...] -x <sysdef-export.xml>
+#                          -w <work-dir> -t <target-repo> [-m <migration.properties>] [-c <schema.json>]
+#                          [-S <source-ws>] [-T <target-ws>]
 #
 #   -r  repository URI or nickname for scm (log in first: scm login -r <uri> -u <user> -n <nick> -c)
-#   -s  stream to migrate
+#   -s  stream to migrate, optionally with its branch name. The first stream is the main line (branch main
+#       by default); every further stream becomes a branch (default: its name in lower case with dashes)
+#       that starts at the newest commit whose configuration the stream contains
 #   -x  system definition export (XML from the Build System Toolkit's ld: Ant tasks)
-#   -w  work folder: the migration mirror goes to <work>/mirror, the shared zBuilder
-#       configuration to <work>/zbuilder (both reused when the script runs again)
-#   -t  new repository in the target layout (zOSsrc -> src, dbb-app.yaml); must not exist
+#   -w  work folder: the migration mirror of the first stream goes to <work>/mirror, those of the other
+#       streams to <work>/streams/<branch> (linked worktrees of the mirror's repository), the shared
+#       zBuilder configuration to <work>/zbuilder (all reused when the script runs again)
+#   -t  new repository in the target layout (zOSsrc -> src, dbb-app.yaml on every branch); must not exist
 #   -m  migration properties (default: migration.properties of this repository)
 #   -c  zBuilder JSON schema: every generated YAML file must validate against it
-#   -S/-T  names of the source/target repository workspaces (default: rtc2git-<stream>-source/-target);
-#       created from the stream when they do not exist
+#   -S/-T  names of the source/target repository workspaces of the first stream (default:
+#       rtc2git-<stream>-source/-target, as for the other streams); created from the stream when they do not exist
 #
 # Environment: SCM (default: scm on the PATH) must be an SCM Tools with Enterprise Extensions and the
 # migrate-to-git plugin (tools/assemble-ee-scmtools.sh, tools/install-scmtools-plugin.sh); uv runs ewm2zbuilder.
 #
 # Steps:
-#   1. scm migrate-to-git --stream: mirror of the stream's history, with .ewm/zos-metadata.json and
-#      z/OS code pages in .gitattributes (resumes when run again)
+#   1. scm migrate-to-git --stream, once per stream: mirror of the stream's history, with
+#      .ewm/zos-metadata.json and z/OS code pages in .gitattributes (resumes when run again)
 #   2. ewm2zbuilder: shared zBuilder configuration and language-map.yaml from the system definitions
-#   3. ewm2zbuilder layout: the target repository, plus dbb-app.yaml from the newest metadata
+#   3. ewm2zbuilder layout: the target repository with every branch, plus dbb-app.yaml from each branch's
+#      newest metadata
 set -eu
 
 HERE=$(cd "$(dirname "$0")/.." && pwd)
 SCM=${SCM:-scm}
-REPO= STREAM= EXPORT= WORK= TARGET= SCHEMA= SOURCE_WS= TARGET_WS=
+REPO= STREAMS= PRIMARY= EXPORT= WORK= TARGET= SCHEMA= SOURCE_WS= TARGET_WS=
 PROPERTIES="$HERE/migration.properties"
+NL='
+'
 
 while getopts r:s:x:w:t:m:c:S:T: opt; do
   case $opt in
-    r) REPO=$OPTARG ;; s) STREAM=$OPTARG ;; x) EXPORT=$OPTARG ;; w) WORK=$OPTARG ;;
+    r) REPO=$OPTARG ;; s) STREAMS="$STREAMS$OPTARG$NL" ;; x) EXPORT=$OPTARG ;; w) WORK=$OPTARG ;;
     t) TARGET=$OPTARG ;; m) PROPERTIES=$OPTARG ;; c) SCHEMA=$OPTARG ;;
     S) SOURCE_WS=$OPTARG ;; T) TARGET_WS=$OPTARG ;;
-    *) sed -n '2,25p' "$0" >&2; exit 2 ;;
+    *) sed -n '2,32p' "$0" >&2; exit 2 ;;
   esac
 done
-for required in REPO STREAM EXPORT WORK TARGET; do
+for required in REPO STREAMS EXPORT WORK TARGET; do
   eval "value=\${$required}"
   [ -n "$value" ] || { echo "missing option for $required (see $0 header)" >&2; exit 2; }
 done
@@ -51,29 +58,55 @@ PROPERTIES=$(absolute "$PROPERTIES")
 [ -z "$SCHEMA" ] || [ -f "$SCHEMA" ] || { echo "schema not found: $SCHEMA" >&2; exit 1; }
 [ -f "$PROPERTIES" ] || { echo "migration properties not found: $PROPERTIES" >&2; exit 1; }
 [ ! -e "$TARGET" ] || { echo "target exists already: $TARGET" >&2; exit 1; }
-SLUG=$(printf '%s' "$STREAM" | tr -c 'A-Za-z0-9' '-' | tr 'A-Z' 'a-z' | sed 's/--*/-/g; s/^-//; s/-$//')
-SOURCE_WS=${SOURCE_WS:-rtc2git-$SLUG-source}
-TARGET_WS=${TARGET_WS:-rtc2git-$SLUG-target}
+slug() { printf '%s' "$1" | tr -c 'A-Za-z0-9' '-' | tr 'A-Z' 'a-z' | sed 's/--*/-/g; s/^-//; s/-$//'; }
 SCHEMA_ARG=
 [ -z "$SCHEMA" ] || SCHEMA_ARG="--schema $SCHEMA"
+COUNT=$(printf '%s' "$STREAMS" | grep -c .)
 
-# an empty .jazz5 makes a new directory acceptable to scm as the sandbox given with -d
-mkdir -p "$WORK/mirror/.jazz5"
-
-echo "== 1/3 migrate [$STREAM] into $WORK/mirror"
-"$SCM" migrate-to-git -r "$REPO" -m "$PROPERTIES" --stream "$STREAM" -d "$WORK/mirror" "$SOURCE_WS" "$TARGET_WS"
-git -C "$WORK/mirror" rev-parse --verify -q HEAD >/dev/null || { echo "migration produced no commits" >&2; exit 1; }
-git -C "$WORK/mirror" cat-file -e HEAD:.ewm/zos-metadata.json 2>/dev/null \
-  || echo "warning: no .ewm/zos-metadata.json in the mirror (no z/OS metadata in this stream?)" >&2
+INDEX=0
+OLD_IFS=$IFS
+IFS=$NL
+for SPEC in $STREAMS; do
+  IFS=$OLD_IFS
+  INDEX=$((INDEX + 1))
+  STREAM=${SPEC%%=*}
+  BRANCH=
+  case $SPEC in *=*) BRANCH=${SPEC#*=} ;; esac
+  SLUG=$(slug "$STREAM")
+  SOURCE=rtc2git-$SLUG-source
+  TARGET_WORKSPACE=rtc2git-$SLUG-target
+  if [ $INDEX -eq 1 ]; then
+    BRANCH=${BRANCH:-main}
+    PRIMARY=$BRANCH
+    SANDBOX=$WORK/mirror
+    SOURCE=${SOURCE_WS:-$SOURCE}
+    TARGET_WORKSPACE=${TARGET_WS:-$TARGET_WORKSPACE}
+    set -- -b "$BRANCH"
+  else
+    BRANCH=${BRANCH:-$SLUG}
+    SANDBOX=$WORK/streams/$BRANCH
+    set -- -b "$BRANCH" -g "$WORK/mirror"
+  fi
+  # an empty .jazz5 makes a new directory acceptable to scm as the sandbox given with -d
+  mkdir -p "$SANDBOX/.jazz5"
+  echo "== 1/3 migrate [$STREAM] ($INDEX/$COUNT) into $SANDBOX, branch $BRANCH"
+  "$SCM" migrate-to-git -r "$REPO" -m "$PROPERTIES" --stream "$STREAM" -d "$SANDBOX" "$@" \
+    "$SOURCE" "$TARGET_WORKSPACE"
+  git -C "$SANDBOX" rev-parse --verify -q HEAD >/dev/null || { echo "migration produced no commits" >&2; exit 1; }
+  git -C "$SANDBOX" cat-file -e HEAD:.ewm/zos-metadata.json 2>/dev/null \
+    || echo "warning: no .ewm/zos-metadata.json on branch $BRANCH (no z/OS metadata in this stream?)" >&2
+  IFS=$NL
+done
+IFS=$OLD_IFS
 
 echo "== 2/3 shared zBuilder configuration from $EXPORT into $WORK/zbuilder"
 # shellcheck disable=SC2086
 (cd "$HERE/ewm2zbuilder" && uv run ewm2zbuilder "$EXPORT" -o "$WORK/zbuilder" $SCHEMA_ARG)
 
-echo "== 3/3 target repository $TARGET"
+echo "== 3/3 target repository $TARGET (every branch)"
 # shellcheck disable=SC2086
 (cd "$HERE/ewm2zbuilder" && uv run ewm2zbuilder layout "$WORK/mirror" "$TARGET" \
-  --language-map "$WORK/zbuilder/language-map.yaml" $SCHEMA_ARG)
+  --branch "$PRIMARY" --language-map "$WORK/zbuilder/language-map.yaml" $SCHEMA_ARG)
 
 echo "Done. Review $WORK/zbuilder/conversion-report.txt; the shared configuration in $WORK/zbuilder"
 echo "goes to the build configuration repository, $TARGET is the application repository."

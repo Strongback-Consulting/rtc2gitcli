@@ -102,3 +102,30 @@ def test_target_must_be_new(mirror, tmp_path):
     (tmp_path / "used" / "x").write_text("x")
     with pytest.raises(RuntimeError):
         transform(mirror, tmp_path / "used")
+
+
+def test_stream_branches_keep_shared_history(mirror, tmp_path):
+    # a second stream migrated with --git-repository: a branch from the first change set, with its own work
+    run(mirror, "branch", "release", "HEAD~1")
+    run(mirror, "checkout", "-q", "release")
+    commit(mirror, {"App/zOSsrc/COBOL/B.cbl": "       ID DIVISION.\n"}, "Fix on release\n\nEWM-ChangeSet: _cs9",
+           "1700004000 +0000")
+    run(mirror, "checkout", "-q", "master")
+    language_map = tmp_path / "language-map.yaml"
+    language_map.write_text(yaml.safe_dump({"Batch": {"task": "Cobol", "variables": {}},
+                                            "CICS": {"task": "Cobol", "variables": {"IS_CICS": True}}}))
+
+    assert main(["layout", str(mirror), str(tmp_path / "t"), "--language-map", str(language_map)]) == 0
+
+    target = tmp_path / "t"
+    assert run(target, "branch", "--format=%(refname:short)").split() == ["main", "release"]
+    # the shared commits exist once: the branches meet at the rewritten "Add A"
+    base = run(target, "merge-base", "main", "release")
+    assert run(target, "log", "-1", "--format=%s", base) == "Add A"
+    assert run(target, "log", "--format=%s", "release~1", "-1") == "Fix on release"
+    assert run(target, "ls-tree", "-r", "--name-only", "release~1", "App").split() == \
+        ["App/src/COBOL/A.cbl", "App/src/COBOL/B.cbl"]
+    # dbb-app.yaml from each branch's own metadata
+    assert "IS_CICS" in run(target, "show", "main:dbb-app.yaml")
+    assert "IS_CICS" not in run(target, "show", "release:dbb-app.yaml")
+    assert run(target, "describe", "--tags", "release~1").startswith("Sprint_1")

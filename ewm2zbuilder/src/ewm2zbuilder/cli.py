@@ -110,7 +110,9 @@ def layout_main(argv: list[str]) -> int:
                                  description="copy the migration mirror into a repository in the target layout")
     ap.add_argument("mirror", type=Path, help="repository written by scm migrate-to-git (the sandbox)")
     ap.add_argument("target", type=Path, help="new repository (must not exist or be empty)")
-    ap.add_argument("--branch", default="main")
+    ap.add_argument("--branch", default="main",
+                    help="name of the mirror's current branch in the target (default main); the branches of"
+                         " other streams keep their names")
     ap.add_argument("--rename", action="append", metavar="OLD=NEW",
                     help="folder rename (default zOSsrc=src); 'none' for no renames")
     ap.add_argument("--language-map", type=Path,
@@ -123,29 +125,41 @@ def layout_main(argv: list[str]) -> int:
     if args.rename:
         renames = () if args.rename == ["none"] else tuple(tuple(r.split("=", 1)) for r in args.rename)
     app_yaml = None
+    failed: list[str] = []
     if args.language_map:
-        metadata = metadata_at(args.mirror)
-        if metadata is None:
-            print("no .ewm/zos-metadata.json in the mirror: no dbb-app.yaml", file=sys.stderr)
-        else:
-            config = build(metadata, yaml.safe_load(args.language_map.read_text()) or {}, SCHEMA_VERSION,
-                           renames, args.path_prefix)
+        language_map = yaml.safe_load(args.language_map.read_text()) or {}
+        validator = None
+        if args.schema:
+            import json
+
+            from jsonschema import Draft202012Validator
+
+            validator = Draft202012Validator(json.loads(args.schema.read_text()))
+
+        def app_yaml(branch: str, metadata: dict | None) -> bytes | None:
+            if metadata is None:
+                print(f"{branch}: no .ewm/zos-metadata.json at the branch tip: no dbb-app.yaml", file=sys.stderr)
+                return None
+            config = build(metadata, language_map, SCHEMA_VERSION, renames, args.path_prefix)
             for note in config.notes:
-                print(f"note: {note}", file=sys.stderr)
-            if args.schema:
-                import json
+                print(f"{branch}: note: {note}", file=sys.stderr)
+            errors = list(validator.iter_errors(config.document)) if validator else []
+            for error in errors:
+                print(f"{branch}: schema: {error.message[:200]}", file=sys.stderr)
+            if errors:
+                failed.append(branch)
+                return None
+            return _dump(config.document).encode("utf-8")
 
-                from jsonschema import Draft202012Validator
-
-                errors = list(Draft202012Validator(json.loads(args.schema.read_text())).iter_errors(config.document))
-                for error in errors:
-                    print(f"schema: {error.message[:200]}", file=sys.stderr)
-                if errors:
-                    return 1
-            app_yaml = _dump(config.document).encode("utf-8")
     result = transform(args.mirror, args.target, args.branch, renames, app_yaml)
-    print(f"{args.target}: {result.commits} commit(s), {len(result.tags)} tag(s)"
-          f"{', plus dbb-app.yaml' if app_yaml else ''}; {args.branch} at {result.head[:12]}")
+    for name, tip in sorted(result.branches.items()):
+        extra = ", plus dbb-app.yaml" if name in result.app_yaml else ""
+        print(f"{args.target}: branch {name} at {tip[:12]}{extra}")
+    print(f"{args.target}: {result.commits} commit(s), {len(result.tags)} tag(s), "
+          f"{len(result.branches)} branch(es)")
+    if failed:
+        print(f"dbb-app.yaml does not validate on {', '.join(failed)}", file=sys.stderr)
+        return 1
     return 0
 
 

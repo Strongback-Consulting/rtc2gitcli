@@ -1,10 +1,15 @@
 # Migrating an EWM z/OS stream to Git and DBB zBuilder
 
-`tools/migrate-zos` runs the three steps below for one stream. Each step can also be run on its own.
+`tools/migrate-zos` runs the three steps below. Each step can also be run on its own.
 
 ```bash
 tools/migrate-zos -r <nick> -s "<stream>" -x <sysdef-export.xml> -w <work> -t <app-repo> -c <zBuilder schema.json>
 ```
+
+Repeat `-s "<stream>[=<branch>]"` to migrate several streams as branches of one repository (see `docs/streams-as-branches.md`):
+- The first stream is the main line (branch `main`), in `<work>/mirror`.
+- Each further stream is a branch in `<work>/streams/<branch>`.
+- Step 3 copies every branch and adds a `dbb-app.yaml` to each branch tip.
 
 | Step | Tool | Output |
 |---|---|---|
@@ -66,6 +71,7 @@ IBM's Mortgage sample, "Mortgage Development Stream" (5 components, 11 change se
   - `dbb-app.yaml` validates against the schema.
   - It assigns every COBOL member to that task with per-file `IS_CICS`/`IS_SQL`/`doLinkEdit`. That includes the mixed `MortgageApplication-JKECMORT/src/COBOL` folder (CICS+Db2, CICS, and a batch compile-only member).
   - Running the wrapper twice gives the same commits.
+- **Two streams:** "Mortgage Test Stream" was added as branch `test`. The branch point and its verification are in `docs/streams-as-branches.md`. Each branch gets its own `dbb-app.yaml`.
 
 ## Not verified yet
 

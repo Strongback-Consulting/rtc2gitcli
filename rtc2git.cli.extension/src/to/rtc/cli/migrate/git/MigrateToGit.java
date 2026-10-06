@@ -1,5 +1,6 @@
 package to.rtc.cli.migrate.git;
 
+import java.io.File;
 import java.io.FileInputStream;
 import java.io.IOException;
 import java.util.Properties;
@@ -21,7 +22,18 @@ public class MigrateToGit extends MigrateTo {
 	public void run() throws FileSystemException {
 		migrationProperties = readProperties(config.getSubcommandCommandLine());
 		baselineIncludeRegexPattern = Pattern.compile(migrationProperties.getProperty("rtc.baseline.include", ""));
-		migratorImplementation = new GitMigrator(migrationProperties);
+		GitMigrator gitMigrator = new GitMigrator(migrationProperties);
+		ICommandLine subargs = config.getSubcommandCommandLine();
+		if (subargs.hasOption(MigrateToGitOptions.OPT_BRANCH)) {
+			gitMigrator.setBranch(subargs.getOption(MigrateToGitOptions.OPT_BRANCH));
+		}
+		if (subargs.hasOption(MigrateToGitOptions.OPT_GIT_REPOSITORY)) {
+			if (!subargs.hasOption(MigrateToGitOptions.OPT_BRANCH)) {
+				throw new IllegalArgumentException("--git-repository needs the name of the new --branch");
+			}
+			gitMigrator.setBranchRepository(new File(subargs.getOption(MigrateToGitOptions.OPT_GIT_REPOSITORY)));
+		}
+		migratorImplementation = gitMigrator;
 		try {
 			super.run();
 		} finally {

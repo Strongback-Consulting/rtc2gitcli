@@ -2,6 +2,7 @@ package to.rtc.cli.migrate;
 
 import java.io.File;
 import java.util.Collection;
+import java.util.List;
 import java.util.Map;
 
 import to.rtc.cli.migrate.zos.SystemDefinitions;
@@ -76,6 +77,27 @@ public interface Migrator {
 	 *            component UUID -> change set UUID ("" for a component without change sets)
 	 */
 	default void setInitialState(Map<String, String> newestChangeSets) {
+	}
+
+	/**
+	 * For a run that adds its stream as a new branch to the repository of earlier migrations: the branches there.
+	 * Called before the target workspace is loaded.
+	 *
+	 * @return branch name -> its commits along the first parents, oldest first; <code>null</code> if this run does
+	 *         not start a new branch (no such repository configured, or the sandbox has a repository already)
+	 */
+	default Map<String, List<BranchPoint.Commit>> readBranches(File sandboxRootDirectory) {
+		return null;
+	}
+
+	/**
+	 * Starts the new branch (see {@link #readBranches(File)}) at the commit, after the target workspace was set to
+	 * that commit's configuration and loaded; before {@link #inspectResume(File)}.
+	 *
+	 * @param commitId
+	 *            the branch point, <code>null</code> for a branch with its own initial commit
+	 */
+	default void startBranch(File sandboxRootDirectory, String commitId) {
 	}
 
 	/**

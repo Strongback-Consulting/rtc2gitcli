@@ -59,6 +59,7 @@ uv run ewm2zbuilder layout <mirror> <target> [--language-map out/language-map.ya
   - The mirror (the `scm` sandbox) keeps the EWM layout: resume, the dirty-sandbox check and the byte-for-byte check against `scm load` depend on it. Never rename paths inside `GitMigrator`.
   - `layout` rewrites every commit with the folder renames, including the paths inside `.gitattributes`, `.gitignore` and `.ewm/zos-metadata.json`. It keeps authors, dates, messages and annotated tags, and can add `dbb-app.yaml` in a last commit.
   - The rewrite is deterministic: without renames it reproduces the mirror's commit IDs exactly.
+  - Every branch of the mirror is copied. The current branch is renamed to `--branch`, and shared history is rewritten once. `dbb-app.yaml` is built from each branch tip's metadata.
 
 Neither the IBM zBuilder schema nor any client export is committed. Tests find them through `EWM2ZBUILDER_SCHEMA` and `EWM2ZBUILDER_EXPORT`, or in the git-ignored `ewm2zbuilder/schema/` and `ewm2zbuilder/local/` folders, and skip when they are absent. This repo is public: never commit client system definitions, data set names, or generated output.
 
@@ -85,7 +86,11 @@ Phase 2 additions:
 - **Resume.** The initial commit stores `EWM-Base` trailers. `ResumeAnalysis` compares them, plus the `EWM-ChangeSet` trailers, with the target workspace history before the incoming change sets are computed, and discards accepted-but-uncommitted change sets.
 - **Snapshots.** These become `snapshot/<name>` tags (`SnapshotTag`, `SnapshotPlacer`); `EWM-Snapshot` and `EWM-Baseline` lines in the tag message identify them on reruns.
 - **Workspace setup.** `--stream` creates both workspaces (`ewm/WorkspaceProvisioner`) and loads the target when none of its components is in the sandbox. scm fixes the sandbox root when the command starts (`initpolicy`), so a new sandbox needs `-d`; otherwise the in-process load registers it with a second daemon and fails. With `-d`, the `uri/argument/ancestor` policy only accepts a directory that already is a sandbox, which an empty `.jazz5` folder satisfies (`tools/migrate-zos` creates it).
-- **Report.** `MigrationReport` writes `.git/rtc2git/report-<time>.json` on every run that has a repository.
+- **Report.** `MigrationReport` writes `<git dir>/rtc2git/report-<time>.json` on every run that has a repository.
+
+Streams as branches (Phase 5, `docs/streams-as-branches.md`):
+- **Branches.** One run per stream. `-b` names the branch. With `-g <earlier sandbox>`, a new sandbox becomes a linked worktree of that repository; `GitMigrator.startBranch` writes the worktree files itself, and JGit 7.3 handles linked worktrees. `.git` can therefore be a file: use `MigrationReport.gitDirectory`, never `new File(sandbox, ".git")` as a directory.
+- **Branch point.** `BranchPoint` (pure, unit-tested) walks every branch's first-parent chain and matches each `EWM-ChangeSet` against the stream's per-component delivery order. `WorkspaceProvisioner.acceptConfiguration` accepts the matched prefix into the not-yet-loaded target workspace. The existing resume checks then verify the sandbox against the commit.
 
 z/OS (`zos/`, Phase 3 onward; the EE data model is in `docs/ewm-zos-model.md`):
 - **Properties.** Members and zFolders reference their language and data set definitions by UUID in user properties (`ZosProperties`), which `FileProperties` already carries.

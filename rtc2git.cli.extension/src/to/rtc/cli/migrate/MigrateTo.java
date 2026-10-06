@@ -172,9 +172,26 @@ public abstract class MigrateTo extends AbstractSubcommand implements ISubcomman
 			}
 			RtcCommands commands = new CliRtcCommands(config, output, connection,
 					destinationWsOption.getStringValue(), sandboxDirectory.getAbsolutePath());
+			boolean targetLoaded = !RepoUtil.getComponentsInSandbox(destinationWs.getItemId().getUuidValue(),
+					new PathLocation(sandboxDirectory.getAbsolutePath()), client, config).isEmpty();
+			// a new branch in the repository of earlier migrations: the target workspace starts at the branch point
+			Map<String, List<BranchPoint.Commit>> branches = migrator.readBranches(sandboxDirectory);
+			BranchPoint branchPoint = null;
+			if (branches != null) {
+				if (!provision || targetLoaded) {
+					throw new IllegalStateException("A new branch needs --stream and a target workspace that is not"
+							+ " loaded yet: the target workspace is set to the branch point before it is loaded");
+				}
+				branchPoint = findBranchPoint(branches, repo, sourceWs, destinationWs);
+				if (listTagsOnly) {
+					return;
+				}
+				if (report != null) {
+					report.branchStarted(branchPoint);
+				}
+			}
 			// also on a rerun after the workspaces were created but the load failed
-			if (provision && RepoUtil.getComponentsInSandbox(destinationWs.getItemId().getUuidValue(),
-					new PathLocation(sandboxDirectory.getAbsolutePath()), client, config).isEmpty()) {
+			if (provision && !targetLoaded) {
 				if (new File(sandboxDirectory, ".git").exists()) {
 					throw new IllegalStateException("The target workspace is not loaded in the sandbox "
 							+ sandboxDirectory + " but it contains a git repository; use an empty directory");
@@ -184,6 +201,9 @@ public abstract class MigrateTo extends AbstractSubcommand implements ISubcomman
 				if (loaded != Constants.STATUS_OK.intValue()) {
 					throw new CLIClientException("Loading the new target workspace failed with status [" + loaded + "]");
 				}
+			}
+			if (branches != null) {
+				migrator.startBranch(sandboxDirectory, branchPoint == null ? null : branchPoint.getCommitId());
 			}
 			// before the incoming change sets are computed: a change set discarded here must be incoming again
 			recoverInterruptedMigration(migrator, commands, sandboxDirectory,
@@ -280,6 +300,28 @@ public abstract class MigrateTo extends AbstractSubcommand implements ISubcomman
 		}
 	}
 
+	/**
+	 * Finds where the stream's branch starts and sets the target workspace to that commit's configuration.
+	 */
+	private BranchPoint findBranchPoint(Map<String, List<BranchPoint.Commit>> branches, ITeamRepository repo,
+			IWorkspace sourceWs, IWorkspace destinationWs) throws TeamRepositoryException {
+		output.writeLine("Find the branch point among the branches " + branches.keySet());
+		BranchPoint point = BranchPoint.find(branches, getChangeSetHistory(repo, sourceWs, "source"));
+		if (point == null) {
+			warn("the stream shares no history with the branches " + branches.keySet()
+					+ "; its branch starts with its own initial commit");
+			return null;
+		}
+		output.writeLine("The branch starts at commit [" + point.getCommitId() + "] of branch [" + point.getBranch()
+				+ "] after " + point.getChangeSets() + " shared change sets"
+				+ (point.getStop() == null ? " (the whole branch)" : "; the shared history ends: " + point.getStop()));
+		if (!listTagsOnly) {
+			new WorkspaceProvisioner(repo, output).acceptConfiguration(sourceWs, destinationWs,
+					point.getConfiguration(), getChangeSetHistory(repo, destinationWs, "target"));
+		}
+		return point;
+	}
+
 	private void createSnapshotTags(Migrator migrator, List<SnapshotTag> snapshots) {
 		for (SnapshotTag snapshot : snapshots) {
 			output.writeLine("Tagging " + snapshot + " as [" + snapshot.getName() + "]");
@@ -308,7 +350,8 @@ public abstract class MigrateTo extends AbstractSubcommand implements ISubcomman
 		MigrationReport finished = report;
 		report = null;
 		finished.finished(failure);
-		if (!new File(reportDirectory, ".git/HEAD").isFile()) {
+		File gitDirectory = MigrationReport.gitDirectory(reportDirectory);
+		if (gitDirectory == null || !new File(gitDirectory, "HEAD").isFile()) {
 			return;
 		}
 		try {

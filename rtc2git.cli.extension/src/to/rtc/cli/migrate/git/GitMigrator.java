@@ -28,6 +28,7 @@ import java.util.regex.Pattern;
 import org.eclipse.jgit.api.AddCommand;
 import org.eclipse.jgit.api.CheckoutCommand;
 import org.eclipse.jgit.api.Git;
+import org.eclipse.jgit.api.ResetCommand.ResetType;
 import org.eclipse.jgit.api.RmCommand;
 import org.eclipse.jgit.api.Status;
 import org.eclipse.jgit.api.errors.EmptyCommitException;
@@ -43,6 +44,7 @@ import org.eclipse.jgit.lib.ObjectId;
 import org.eclipse.jgit.lib.ObjectInserter;
 import org.eclipse.jgit.lib.PersonIdent;
 import org.eclipse.jgit.lib.Ref;
+import org.eclipse.jgit.lib.RefUpdate;
 import org.eclipse.jgit.lib.Repository;
 import org.eclipse.jgit.lib.StoredConfig;
 import org.eclipse.jgit.revwalk.RevCommit;
@@ -51,6 +53,7 @@ import org.eclipse.jgit.revwalk.RevTag;
 import org.eclipse.jgit.revwalk.RevWalk;
 import org.eclipse.jgit.storage.file.WindowCacheConfig;
 
+import to.rtc.cli.migrate.BranchPoint;
 import to.rtc.cli.migrate.ChangeSet;
 import to.rtc.cli.migrate.ChangeSet.WorkItem;
 import to.rtc.cli.migrate.FileProperties;
@@ -116,6 +119,12 @@ public final class GitMigrator implements Migrator {
 	private Set<String> taggedBaselines;
 	// UUIDs of the EWM snapshots that already have a tag
 	private Set<String> taggedSnapshots;
+	// the branch this migration commits to (null: the current or JGit's initial branch)
+	private String branch;
+	// repository of an earlier migration that a new sandbox adds its branch to, as a linked worktree
+	private File branchRepository;
+	// the commit a new branch started at, while the sandbox is checked against it
+	private String branchStart;
 
 	public GitMigrator(Properties properties) {
 		ignoredFileExtensions = new HashSet<String>();
@@ -618,9 +627,14 @@ public final class GitMigrator implements Migrator {
 			File bareGitDirectory = new File(sandboxRootDirectory, ".git");
 			if (bareGitDirectory.exists()) {
 				git = Git.open(sandboxRootDirectory);
+				String current = git.getRepository().getBranch();
+				if (branch != null && !branch.equals(current)) {
+					throw new IllegalStateException("The sandbox " + sandboxRootDirectory + " is on branch [" + current
+							+ "], not on [" + branch + "]");
+				}
 				checkResumable();
 			} else if (sandboxRootDirectory.exists()) {
-				git = Git.init().setDirectory(sandboxRootDirectory).call();
+				git = Git.init().setDirectory(sandboxRootDirectory).setInitialBranch(branch).call();
 			} else {
 				throw new RuntimeException(bareGitDirectory + " does not exist");
 			}
@@ -939,6 +953,12 @@ public final class GitMigrator implements Migrator {
 				pending.remove(missing);
 			}
 		}
+		if (!pending.isEmpty() && branchStart != null) {
+			throw new IllegalStateException("The target workspace loaded into " + rootDir
+					+ " differs from the branch point " + branchStart + " in " + pending
+					+ ". The stream's history matched the commit, so its content should too; check the migration"
+					+ " properties and file properties of both migrations.");
+		}
 		if (!pending.isEmpty()) {
 			throw new IllegalStateException("The sandbox " + rootDir + " has uncommitted changes " + pending
 					+ ". A previous migration probably stopped after accepting a change set but before committing it."
@@ -947,6 +967,145 @@ public final class GitMigrator implements Migrator {
 		for (RevCommit commit : git.log().call()) {
 			migratedChangeSets.addAll(commit.getFooterLines(CHANGE_SET_TRAILER));
 		}
+	}
+
+	/**
+	 * @param name
+	 *            branch to commit to: the initial branch of a new repository, the branch an existing sandbox must be on,
+	 *            or the new branch of {@link #setBranchRepository(File)}
+	 */
+	public void setBranch(String name) {
+		if (name != null && !Repository.isValidRefName(Constants.R_HEADS + name)) {
+			throw new IllegalArgumentException("[" + name + "] is not a valid branch name");
+		}
+		branch = name;
+	}
+
+	/**
+	 * @param repository
+	 *            sandbox or git directory of an earlier migration; a sandbox without repository becomes a linked
+	 *            worktree of it with a new branch
+	 */
+	public void setBranchRepository(File repository) {
+		branchRepository = repository;
+	}
+
+	@Override
+	public Map<String, List<BranchPoint.Commit>> readBranches(File sandboxRootDirectory) {
+		if (branchRepository == null || new File(sandboxRootDirectory, ".git").exists()) {
+			return null;
+		}
+		if (branch == null) {
+			throw new IllegalStateException("Name the branch to add to " + branchRepository);
+		}
+		Map<String, List<BranchPoint.Commit>> branches = new TreeMap<String, List<BranchPoint.Commit>>();
+		try (Repository repository = openBranchRepository(); RevWalk walk = new RevWalk(repository)) {
+			if (repository.exactRef(Constants.R_HEADS + branch) != null) {
+				throw new IllegalStateException("Branch [" + branch + "] exists already in " + branchRepository);
+			}
+			for (Ref ref : repository.getRefDatabase().getRefsByPrefix(Constants.R_HEADS)) {
+				List<BranchPoint.Commit> commits = new ArrayList<BranchPoint.Commit>();
+				for (RevCommit commit = walk.parseCommit(ref.getObjectId()); commit != null;) {
+					List<String> changeSets = commit.getFooterLines(CHANGE_SET_TRAILER);
+					Map<String, String> base = new HashMap<String, String>();
+					for (String line : commit.getFooterLines(BASE_TRAILER)) {
+						int equals = line.indexOf('=');
+						if (equals > 0) {
+							base.put(line.substring(0, equals).trim(), line.substring(equals + 1).trim());
+						}
+					}
+					commits.add(new BranchPoint.Commit(commit.name(),
+							changeSets.isEmpty() ? null : changeSets.get(changeSets.size() - 1), base));
+					commit = commit.getParentCount() == 0 ? null : walk.parseCommit(commit.getParent(0));
+				}
+				Collections.reverse(commits);
+				branches.put(ref.getName().substring(Constants.R_HEADS.length()), commits);
+			}
+		} catch (IOException e) {
+			throw new RuntimeException("Unable to read the branches of " + branchRepository, e);
+		}
+		return branches;
+	}
+
+	private Repository openBranchRepository() throws IOException {
+		try (Git opened = Git.open(branchRepository)) {
+			Repository repository = opened.getRepository();
+			// the main repository also when given a linked worktree of it
+			File common = repository.getCommonDirectory();
+			return Git.open(common != null ? common : repository.getDirectory()).getRepository();
+		}
+	}
+
+	/**
+	 * Makes the sandbox a linked worktree of the branch repository, on a new branch at the commit; the working tree
+	 * is the target workspace loaded at that commit's configuration. Files the migration generates (they are not in
+	 * EWM) are restored from the commit; anything else that differs makes {@link #init(File)} fail.
+	 */
+	@Override
+	public void startBranch(File sandboxRootDirectory, String commitId) {
+		File sandbox = sandboxRootDirectory.getAbsoluteFile();
+		try (Repository repository = openBranchRepository()) {
+			File common = repository.getDirectory().getAbsoluteFile();
+			String id = branch.replaceAll("[^A-Za-z0-9._-]", "-");
+			File admin = new File(common, "worktrees/" + id);
+			for (int i = 2; admin.exists(); i++) {
+				admin = new File(common, "worktrees/" + id + i);
+			}
+			if (!admin.mkdirs()) {
+				throw new IOException("Unable to create " + admin);
+			}
+			write(new File(admin, "commondir"), "../..\n");
+			write(new File(admin, "gitdir"), new File(sandbox, ".git").getPath() + "\n");
+			write(new File(admin, "HEAD"), "ref: " + Constants.R_HEADS + branch + "\n");
+			if (commitId != null) {
+				RefUpdate update = repository.updateRef(Constants.R_HEADS + branch);
+				update.setNewObjectId(ObjectId.fromString(commitId));
+				update.setExpectedOldObjectId(ObjectId.zeroId());
+				update.setRefLogMessage("branch: Created from " + commitId + " (rtc2git branch point)", false);
+				RefUpdate.Result result = update.update();
+				if (result != RefUpdate.Result.NEW) {
+					throw new IOException("Unable to create branch [" + branch + "]: " + result);
+				}
+			}
+			write(new File(sandbox, ".git"), "gitdir: " + admin.getPath() + "\n");
+		} catch (IOException e) {
+			throw new RuntimeException("Unable to add branch [" + branch + "] to " + branchRepository, e);
+		}
+		if (commitId == null) {
+			return;
+		}
+		branchStart = commitId;
+		try (Git worktree = Git.open(sandbox)) {
+			worktree.reset().setMode(ResetType.MIXED).setRef(Constants.HEAD).call();
+			CheckoutCommand restore = worktree.checkout();
+			boolean any = false;
+			for (String missing : worktree.status().call().getMissing()) {
+				if (isGenerated(sandbox, missing)) {
+					restore.addPath(missing);
+					any = true;
+				}
+			}
+			if (any) {
+				restore.call();
+			}
+		} catch (IOException | GitAPIException e) {
+			throw new RuntimeException("Unable to check out the branch point " + commitId, e);
+		}
+	}
+
+	/**
+	 * @return whether the migration writes the file, as opposed to scm loading it from EWM
+	 */
+	static boolean isGenerated(File root, String path) {
+		if (path.equals(".gitignore") || path.equals(".gitattributes") || path.equals(ZosMetadata.PATH)) {
+			return true;
+		}
+		Matcher matcher = GITIGNORE_PATTERN.matcher(path);
+		return matcher.matches() && new File(root, matcher.group(1) + ".jazzignore").isFile();
+	}
+
+	private static void write(File file, String content) throws IOException {
+		java.nio.file.Files.write(file.toPath(), content.getBytes(StandardCharsets.UTF_8));
 	}
 
 	@Override

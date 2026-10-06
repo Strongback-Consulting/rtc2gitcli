@@ -57,6 +57,20 @@ public final class MigrationReport {
 		tags.add(entry);
 	}
 
+	/**
+	 * Records where the branch of this run starts in the repository of earlier migrations.
+	 */
+	public synchronized void branchStarted(BranchPoint point) {
+		Map<String, Object> entry = new LinkedHashMap<String, Object>();
+		if (point != null) {
+			entry.put("from", point.getBranch());
+			entry.put("commit", point.getCommitId());
+			entry.put("sharedChangeSets", Integer.valueOf(point.getChangeSets()));
+			entry.put("sharedUntil", point.getStop());
+		}
+		root.put("branchPoint", entry);
+	}
+
 	public synchronized void warning(String message) {
 		warnings.add(message);
 	}
@@ -92,7 +106,8 @@ public final class MigrationReport {
 	 * @return the written file
 	 */
 	public synchronized File write(File sandboxDirectory) throws IOException {
-		File directory = new File(sandboxDirectory, ".git/rtc2git");
+		File gitDirectory = gitDirectory(sandboxDirectory);
+		File directory = new File(gitDirectory != null ? gitDirectory : new File(sandboxDirectory, ".git"), "rtc2git");
 		directory.mkdirs();
 		SimpleDateFormat format = new SimpleDateFormat("yyyyMMdd-HHmmss");
 		File file = new File(directory, "report-" + format.format(new Date()) + ".json");
@@ -110,6 +125,30 @@ public final class MigrationReport {
 		document.put("warnings", warnings);
 		JsonWriter.write(file, document);
 		return file;
+	}
+
+	/**
+	 * @return the git directory of the sandbox: <code>.git</code>, or for a linked worktree the directory its
+	 *         <code>.git</code> file points to; <code>null</code> if there is no repository
+	 */
+	public static File gitDirectory(File sandboxDirectory) {
+		File dotGit = new File(sandboxDirectory, ".git");
+		if (dotGit.isDirectory()) {
+			return dotGit;
+		}
+		if (dotGit.isFile()) {
+			try {
+				String content = new String(java.nio.file.Files.readAllBytes(dotGit.toPath()),
+						java.nio.charset.StandardCharsets.UTF_8).trim();
+				if (content.startsWith("gitdir:")) {
+					File gitDir = new File(content.substring("gitdir:".length()).trim());
+					return gitDir.isAbsolute() ? gitDir : new File(sandboxDirectory, gitDir.getPath());
+				}
+			} catch (IOException e) {
+				return null;
+			}
+		}
+		return null;
 	}
 
 	static String timestamp(long millis) {
