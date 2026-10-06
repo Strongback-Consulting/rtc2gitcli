@@ -105,4 +105,4 @@ On macOS, the toolkit's `tools/install/configure.sh` needs GNU `getopt` and fail
 
 The toolkit's Node.js server serves only repositories directly under its root (`/git/<name>.git`).
 
-Not verified yet: a link created from a migrated commit that references a work item. That needs a Git server with the toolkit's hooks or a webhook, and permission to register Git repositories in the project area. `tools/push-history` was tested against a local bare repository whose hook counted the commits of each push.
+- **Work item link:** the migrated JKE Banking commit `#73` (migrated with `rtc.workitem.number.format=#%s`) was pushed as a test branch. The post-receive hook asked EWM to link it to work item 73, and EWM accepted. The toolkit records each accepted link as a git note (`refs/notes/commits`, `rtc.wi:73`). That needs a Git server with the toolkit's hooks or a webhook, and permission to register Git repositories in the project area. `tools/push-history` was tested against a local bare repository whose hook counted the commits of each push.
