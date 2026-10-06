@@ -141,8 +141,9 @@ def parse(path: str | Path) -> SystemDefinition:
     sd = SystemDefinition()
 
     def add(table: dict, key: str, value, kind: str) -> None:
-        if key in table:
-            sd.warnings.append(f"duplicate {kind} name {key!r}; last definition wins")
+        # EWM's export repeats some definitions verbatim; only differing duplicates matter
+        if key in table and table[key] != value:
+            sd.warnings.append(f"duplicate {kind} name {key!r} with different content; last definition wins")
         table[key] = value
 
     for el in root.iter(NS + "dsdef"):

@@ -102,6 +102,23 @@ def condition_obj(fragment: str):
     return None
 
 
+def _add_program_library(dds: list[dict], library: dict) -> None:
+    """The translator's program library goes first in the task library: as its own TASKLIB DD, or, when the
+    translator allocates TASKLIB/STEPLIB itself, as the first entry of that concatenation (one DD per name)."""
+    index = next((i for i, dd in enumerate(dds) if dd.get("name") in ("TASKLIB", "STEPLIB")), None)
+    if index is None:
+        dds.insert(0, library)
+        return
+    end = index + 1
+    while end < len(dds) and "name" not in dds[end]:
+        end += 1
+    if any(dd.get("dsn") == library["dsn"] for dd in dds[index:end]):
+        return
+    head = dds[index]
+    dds[index] = {k: v for k, v in head.items() if k != "name"}
+    dds.insert(index, {**library, "name": head["name"]})
+
+
 def _same_step(a, b) -> bool:
     """Same program, settings and EWM condition; options and DDs may differ."""
     def bare(step: dict) -> dict:
@@ -234,6 +251,7 @@ class _Converter:
         step: dict = {"step": t.name}
         d = self.sd.dsdefs.get(t.ds_def) if t.ds_def else None
         dds: list[dict] = []
+        program_library = None
         if t.call_method == CALL_COMMAND:
             step["type"] = "tso"
             step["command"] = self.text(t.command_member or "", ld.name, where)
@@ -246,7 +264,7 @@ class _Converter:
             else:
                 step["pgm"] = d.member or d.ds_name
                 if d.ds_name and d.member:  # program lives in a specific library
-                    dds.append({"name": "TASKLIB", "dsn": f"${{{self.sysvar(d)}}}", "options": "shr"})
+                    program_library = {"name": "TASKLIB", "dsn": f"${{{self.sysvar(d)}}}", "options": "shr"}
             if t.default_options:
                 step["parm"] = self.text(t.default_options, ld.name, where, t.variables)
         if cond:
@@ -263,6 +281,8 @@ class _Converter:
                     dds.append({"name": item.dd_name, **e} if i == 0 else e)
             else:
                 dds.append(self.dd(item, ld, f"{where} DD {item.dd_name}", datasets))
+        if program_library:
+            _add_program_library(dds, program_library)
         if dds:
             step["dds"] = [FlowDict(d) for d in dds]
         return step
@@ -375,8 +395,12 @@ class _Converter:
         their DDs aligned, each DD that not every variant has getting the condition of those that do."""
         primary = next((b for b in built if fam.task in b[0]), built[0])
         step = dict(primary[1])
-        parms = [(condition_for({fam.values(m) for m in members}, fam), s.get("parm")) for members, s, _ in built]
-        if len({p for _, p in parms}) > 1:
+        # one select entry per distinct value, for all the variants that use it
+        by_value: dict[str, set] = {}
+        for members, s, _ in built:
+            by_value.setdefault(s.get("parm") or "", set()).update(fam.values(m) for m in members)
+        parms = [(condition_for(combos, fam), value) for value, combos in by_value.items()]
+        if len(parms) > 1:
             var = re.sub(r"[^A-Za-z0-9]+", "_", step["step"]).strip("_").upper() + "_PARMS"
             step["parm"] = f"${{{var}}}"
             selects.append({"name": var, "select": [{"condition": c, "value": p or ""} for c, p in parms]})

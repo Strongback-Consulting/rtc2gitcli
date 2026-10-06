@@ -42,7 +42,13 @@ for required in REPO STREAM EXPORT WORK TARGET; do
   eval "value=\${$required}"
   [ -n "$value" ] || { echo "missing option for $required (see $0 header)" >&2; exit 2; }
 done
+# ewm2zbuilder runs in its own folder: make every path absolute first
+absolute() { case $1 in /*) printf '%s' "$1" ;; *) printf '%s/%s' "$(pwd)" "$1" ;; esac; }
+EXPORT=$(absolute "$EXPORT"); WORK=$(absolute "$WORK"); TARGET=$(absolute "$TARGET")
+PROPERTIES=$(absolute "$PROPERTIES")
+[ -z "$SCHEMA" ] || SCHEMA=$(absolute "$SCHEMA")
 [ -f "$EXPORT" ] || { echo "system definition export not found: $EXPORT" >&2; exit 1; }
+[ -z "$SCHEMA" ] || [ -f "$SCHEMA" ] || { echo "schema not found: $SCHEMA" >&2; exit 1; }
 [ -f "$PROPERTIES" ] || { echo "migration properties not found: $PROPERTIES" >&2; exit 1; }
 [ ! -e "$TARGET" ] || { echo "target exists already: $TARGET" >&2; exit 1; }
 SLUG=$(printf '%s' "$STREAM" | tr -c 'A-Za-z0-9' '-' | tr 'A-Z' 'a-z' | sed 's/--*/-/g; s/^-//; s/-$//')
@@ -53,7 +59,6 @@ SCHEMA_ARG=
 
 # an empty .jazz5 makes a new directory acceptable to scm as the sandbox given with -d
 mkdir -p "$WORK/mirror/.jazz5"
-WORK=$(cd "$WORK" && pwd)
 
 echo "== 1/3 migrate [$STREAM] into $WORK/mirror"
 "$SCM" migrate-to-git -r "$REPO" -m "$PROPERTIES" --stream "$STREAM" -d "$WORK/mirror" "$SOURCE_WS" "$TARGET_WS"

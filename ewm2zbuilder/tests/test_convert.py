@@ -159,3 +159,25 @@ def test_unnamed_dd_dsn_aligns_with_dsn_above(tmp_path):
     assert unnamed.startswith("    - {") and "dsn: " in unnamed
     assert unnamed.index("dsn: ") == named.index("dsn: ")
     assert yaml.safe_load(text)  # still valid YAML
+
+
+def test_program_library_joins_the_translators_own_tasklib(tmp_path):
+    p = tmp_path / "tasklib.xml"
+    p.write_text(SAMPLE.replace(
+        '<ld:allocation input="true" name="SYSIN"/>',
+        '<ld:allocation input="true" name="SYSIN"/>'
+        '<ld:concatenation name="TASKLIB"><ld:allocation dataSetDefinition="Copybooks"/></ld:concatenation>'))
+    task = yaml.safe_load(emit_all(parse(p)).files["Asm_and_Rexx.yaml"])["tasks"][0]
+    dds = next(s for s in task["steps"] if s["step"] == "Asm")["dds"]
+    assert [dd.get("name") for dd in dds].count("TASKLIB") == 1
+    i = next(i for i, dd in enumerate(dds) if dd.get("name") == "TASKLIB")
+    assert dds[i]["dsn"] == "${SYSTEM_ASSEMBLER}" and dds[i + 1] == {"dsn": "${HLQ}.PROD.COPY", "options": "shr"}
+
+
+def test_identical_duplicates_are_not_reported(tmp_path):
+    line = '<ld:dsdef dsDefUsageType="0" dsName="PROD.COPY" name="Copybooks" prefixDSN="true"/>'
+    p = tmp_path / "dup.xml"
+    p.write_text(SAMPLE.replace(line, line + line))
+    assert not parse(p).warnings
+    p.write_text(SAMPLE.replace(line, line + line.replace("PROD.COPY", "OTHER.COPY")))
+    assert any("different content" in w for w in parse(p).warnings)

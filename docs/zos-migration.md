@@ -49,16 +49,23 @@ The mirror keeps EWM's paths: resume and the byte-for-byte check against `scm lo
 
 ## Verified on EWM 7.2
 
-IBM's Mortgage sample, "Mortgage Development Stream" (5 components, 11 change sets), was run through steps 1 and 3. Step 2 was not run: there is no system definition export of the sample, so a hand-written `language-map.yaml` stood in for it.
+IBM's Mortgage sample, "Mortgage Development Stream" (5 components, 11 change sets), was run through all three steps with `tools/migrate-zos`. The system definitions came from `tools/export-sysdefs` for the project area "JKE Banking (Change Management)".
 - **Step 1:** created both workspaces, loaded the target and migrated.
   - The mirror's HEAD is byte-identical to `scm load` of the source workspace (57 files).
   - `.ewm/zos-metadata.json` changes in exactly the three property-only change sets that assign the definitions.
   - Members carry `zos-working-tree-encoding=IBM-1047`.
-  - A rerun adds nothing.
+  - A rerun adds nothing. After a plugin upgrade that changes the generated files, it adds one "Update generated files before resuming the migration" commit.
+- **Step 2:** the 8 language definitions become 4 tasks. All five COBOL definitions form one family:
+  - batch and CICS, each compile-only or with link-edit, plus CICS+Db2;
+  - one compile step whose options come from a `select` on `IS_CICS`/`IS_SQL`;
+  - the Db2 library and `DBRMLIB` only for `IS_SQL`;
+  - the object deck passed to the binder or written to `OBJ` depending on `doLinkEdit`;
+  - the binder step conditioned on `doLinkEdit`.
 - **Step 3:**
   - Commits, tags and file contents are unchanged, under `src/` instead of `zOSsrc/`.
   - `dbb-app.yaml` validates against the schema.
-  - It puts the mixed `MortgageApplication-JKECMORT/src/COBOL` folder's CICS and CICS+DB2 members in one task with per-file `IS_CICS`/`IS_SQL`, and the batch member in its own task.
+  - It assigns every COBOL member to that task with per-file `IS_CICS`/`IS_SQL`/`doLinkEdit`. That includes the mixed `MortgageApplication-JKECMORT/src/COBOL` folder (CICS+Db2, CICS, and a batch compile-only member).
+  - Running the wrapper twice gives the same commits.
 
 ## Not verified yet
 
