@@ -6,21 +6,22 @@ import java.util.List;
 import com.ibm.team.filesystem.cli.client.internal.subcommands.LoadCmdLauncher;
 import com.ibm.team.filesystem.cli.client.internal.subcommands.LoadCmdOptions;
 import com.ibm.team.filesystem.cli.core.AbstractSubcommand;
-import com.ibm.team.filesystem.cli.core.subcommands.CommonOptions;
 import com.ibm.team.filesystem.cli.core.subcommands.IScmClientConfiguration;
-import com.ibm.team.filesystem.client.FileSystemException;
 import com.ibm.team.filesystem.rcp.core.internal.changelog.IChangeLogOutput;
-import com.ibm.team.rtc.cli.infrastructure.internal.parser.ICommandLine;
 import com.ibm.team.rtc.cli.infrastructure.internal.parser.Options;
 import com.ibm.team.rtc.cli.infrastructure.internal.parser.exceptions.ConflictingOptionException;
 
+/**
+ * <code>scm load</code> of the target workspace, or of one of its components (selected by UUID or name).
+ */
 @SuppressWarnings("restriction")
 public class LoadCommandDelegate extends RtcCommandDelegate {
 
-	public LoadCommandDelegate(IScmClientConfiguration config, IChangeLogOutput output, String workspace,
-			String component, boolean force) {
-		super(config, output, "load " + workspace + " force[" + force + "]");
-		setSubCommandLineByReflection(config, workspace, component, force);
+	public LoadCommandDelegate(IScmClientConfiguration config, IChangeLogOutput output, RtcConnection connection,
+			String workspace, String component, boolean force, String directory) {
+		super(config, output, connection,
+				"load " + workspace + (component != null ? " " + component : "") + (force ? " --force" : ""),
+				arguments(workspace, component, force, directory));
 	}
 
 	@Override
@@ -33,42 +34,23 @@ public class LoadCommandDelegate extends RtcCommandDelegate {
 		return new LoadCmdOptions().getOptions();
 	}
 
-	private void setSubCommandLineByReflection(IScmClientConfiguration config, String workspace, String component,
-			boolean force) {
-		String uri = getSubCommandOption(config, CommonOptions.OPT_URI);
-		String username = getSubCommandOption(config, CommonOptions.OPT_USERNAME);
-		String password;
-		if (config.getSubcommandCommandLine().hasOption(CommonOptions.OPT_PASSWORD)) {
-			password = getSubCommandOption(config, CommonOptions.OPT_PASSWORD);
-		} else {
-			try {
-				password = config.getConnectionInfo().getPassword();
-			} catch (FileSystemException e) {
-				throw new RuntimeException("Unable to get password", e);
-			}
-		}
-		setSubCommandLine(config, generateCommandLine(uri, username, password, workspace, component, force));
-	}
-
-	private ICommandLine generateCommandLine(String uri, String username, String password, String workspace,
-			String component, boolean force) {
+	private static List<String> arguments(String workspace, String component, boolean force, String directory) {
 		List<String> args = new ArrayList<String>();
-		args.add("-r");
-		args.add(uri);
-		args.add("-u");
-		args.add(username);
-		args.add("-P");
-		args.add(password);
-
+		if (directory != null) {
+			// load into the migration sandbox, not into the current directory
+			args.add("--" + LoadCmdOptions.OPT_DIR.getLongOpt());
+			args.add(directory);
+		}
+		// the migration owns the target workspace: load it here even if the server says it was last loaded in
+		// another sandbox (e.g. an earlier migration directory)
+		args.add("--allow");
 		if (force) {
 			args.add("--force");
 		}
-
 		args.add(workspace);
 		if (component != null) {
 			args.add(component);
 		}
-
-		return generateCommandLine(args);
+		return args;
 	}
 }

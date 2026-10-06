@@ -132,7 +132,8 @@ public class GitMigratorTest {
 		assertFalse(config.getBoolean("core", null, "ignorecase", true));
 		assertEquals(File.separatorChar == '/' ? "input" : "true", config.getString("core", null, "autocrlf"));
 		assertEquals("simple", config.getString("push", null, "default"));
-		assertFalse(config.getBoolean("http", null, "sslverify", true));
+		// TLS verification is left at git's default
+		assertNull(config.getString("http", null, "sslverify"));
 	}
 
 	@Test
@@ -278,7 +279,9 @@ public class GitMigratorTest {
 		migrator.commitChanges(TestChangeSet.INSTANCE);
 
 		checkGit("Heiri Mueller", "heiri.mueller@irgendwo.ch", "4711 the checkin comment");
-		checkExactLines(new File(basedir, ".gitignore"), Arrays.asList("/*.suo", "*.class"));
+		// the root .gitignore keeps the migration's own entries; the .jazzignore translation is a marked block
+		checkExactLines(new File(basedir, ".gitignore"), Arrays.asList("/.jazz5", "/.jazzShed", "/.metadata",
+				GitMigrator.ROOT_JAZZIGNORE_BEGIN, "/*.suo", "*.class", GitMigrator.ROOT_JAZZIGNORE_END));
 	}
 
 	@Test
@@ -310,7 +313,8 @@ public class GitMigratorTest {
 
 		migrator.commitChanges(TestChangeSet.INSTANCE);
 
-		assertFalse(gitignore.exists());
+		// only the translated block goes; the root .gitignore keeps protecting the scm metadata
+		checkExactLines(gitignore, GitMigrator.ROOT_IGNORED_ENTRIES);
 	}
 
 	@Test
@@ -367,7 +371,7 @@ public class GitMigratorTest {
 
 	@Test
 	public void testCreateTagNameReplacesWhiteSpacesWithUnderscore() {
-		String tagname = migrator.createTagName("tag with whitespaces");
+		String tagname = GitMigrator.createTagName("tag with whitespaces");
 
 		assertThat(tagname, is("tag_with_whitespaces"));
 	}

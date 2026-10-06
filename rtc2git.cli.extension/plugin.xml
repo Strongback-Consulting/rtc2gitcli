@@ -11,5 +11,13 @@
             options="to.rtc.cli.migrate.git.MigrateToGitOptions"
             shortHelp="migrate to git">
       </subcommand>
+      <subcommand
+            class="to.rtc.cli.migrate.zos.ZosInventoryCmd"
+            id="to.rtc.cli.migrate.zos.ZosInventoryCmd"
+            initpolicy="scratch"
+            name="migrate-inventory"
+            options="to.rtc.cli.migrate.zos.ZosInventoryOptions"
+            shortHelp="read-only z/OS inventory of a stream before migration">
+      </subcommand>
    </extension>
 </plugin>

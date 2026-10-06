@@ -17,6 +17,7 @@ public class MigrateToOptions implements IOptionSource {
 	public static final IOptionKey OPT_RTC_CONNECTION_TIMEOUT = new OptionKey("timeout");
 	public static final IOptionKey OPT_RTC_LIST_TAGS_ONLY = new OptionKey("listTagsOnly");
 	public static final IOptionKey OPT_RTC_IS_UPDATE_MIGRATION = new OptionKey("updateMigration");
+	public static final IOptionKey OPT_STREAM = new OptionKey("stream");
 
 	@Override
 	public Options getOptions() throws ConflictingOptionException {
@@ -36,6 +37,10 @@ public class MigrateToOptions implements IOptionSource {
 				"List only all tags that would be migrated but do not migrate them.");
 		options.addOption(new NamedOptionDefinition(OPT_RTC_IS_UPDATE_MIGRATION, "U", "update", 0),
 				"Update the content of an already migrated workspace.");
+		options.addOption(new NamedOptionDefinition(OPT_STREAM, "S", "stream", 1),
+				"Stream to migrate: creates the source and target workspaces from it when they do not exist and"
+						+ " loads the target workspace into the sandbox when it is not loaded there. For a new sandbox,"
+						+ " create the directory with an empty .jazz5 folder and pass it with -d.");
 		return options;
 	}
 }

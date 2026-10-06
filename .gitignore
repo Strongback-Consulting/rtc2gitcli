@@ -16,3 +16,5 @@ hs_err_pid*
 
 # intelliJ IDE
 .idea/
+# Maven/Tycho build output
+target/

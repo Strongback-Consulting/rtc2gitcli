@@ -1,5 +1,8 @@
 package to.rtc.cli.migrate;
 
+import java.util.Collection;
+import java.util.Collections;
+
 /**
  * Represents a tag.
  *
@@ -20,4 +23,31 @@ public interface Tag {
 	 * @return the creation date time stamp
 	 */
 	public long getCreationDate();
+
+	/**
+	 * Returns the name of the tag as defined in EWM, before it was made unique or sanitized.
+	 *
+	 * @return the original name
+	 */
+	default String getOriginalName() {
+		return getName();
+	}
+
+	/**
+	 * Returns the UUIDs of the EWM baselines represented by this tag.
+	 *
+	 * @return the baseline UUIDs, possibly empty
+	 */
+	default Collection<String> getBaselineUuids() {
+		return Collections.emptyList();
+	}
+
+	/**
+	 * Returns the UUID of the EWM snapshot if this tag represents one.
+	 *
+	 * @return the snapshot UUID or <code>null</code> for a baseline tag
+	 */
+	default String getSnapshotUuid() {
+		return null;
+	}
 }

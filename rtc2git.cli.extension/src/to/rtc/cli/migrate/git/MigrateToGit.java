@@ -1,5 +1,6 @@
 package to.rtc.cli.migrate.git;
 
+import java.io.File;
 import java.io.FileInputStream;
 import java.io.IOException;
 import java.util.Properties;
@@ -15,12 +16,24 @@ import com.ibm.team.rtc.cli.infrastructure.internal.parser.ICommandLine;
 public class MigrateToGit extends MigrateTo {
 	private Migrator migratorImplementation;
 	private Pattern baselineIncludeRegexPattern;
+	private Properties migrationProperties;
 
 	@Override
 	public void run() throws FileSystemException {
-		Properties migrationProperties = readProperties(config.getSubcommandCommandLine());
+		migrationProperties = readProperties(config.getSubcommandCommandLine());
 		baselineIncludeRegexPattern = Pattern.compile(migrationProperties.getProperty("rtc.baseline.include", ""));
-		migratorImplementation = new GitMigrator(migrationProperties);
+		GitMigrator gitMigrator = new GitMigrator(migrationProperties);
+		ICommandLine subargs = config.getSubcommandCommandLine();
+		if (subargs.hasOption(MigrateToGitOptions.OPT_BRANCH)) {
+			gitMigrator.setBranch(subargs.getOption(MigrateToGitOptions.OPT_BRANCH));
+		}
+		if (subargs.hasOption(MigrateToGitOptions.OPT_GIT_REPOSITORY)) {
+			if (!subargs.hasOption(MigrateToGitOptions.OPT_BRANCH)) {
+				throw new IllegalArgumentException("--git-repository needs the name of the new --branch");
+			}
+			gitMigrator.setBranchRepository(new File(subargs.getOption(MigrateToGitOptions.OPT_GIT_REPOSITORY)));
+		}
+		migratorImplementation = gitMigrator;
 		try {
 			super.run();
 		} finally {
@@ -36,6 +49,26 @@ public class MigrateToGit extends MigrateTo {
 	@Override
 	public Pattern getBaselineIncludePattern() {
 		return baselineIncludeRegexPattern;
+	}
+
+	@Override
+	protected Pattern getSnapshotIncludePattern() {
+		return Pattern.compile(migrationProperties.getProperty("rtc.snapshot.include", ""));
+	}
+
+	@Override
+	protected String getSnapshotTagPrefix() {
+		return migrationProperties.getProperty("rtc.snapshot.tag.prefix", "snapshot/");
+	}
+
+	@Override
+	protected boolean isDiscardPendingChangeSets() {
+		return Boolean.parseBoolean(migrationProperties.getProperty("resume.discard.pending", "true"));
+	}
+
+	@Override
+	protected boolean isAcceptMissingChangeSets() {
+		return Boolean.parseBoolean(migrationProperties.getProperty("rtc.accept.missing.changesets", "false"));
 	}
 
 	private Properties readProperties(ICommandLine subargs) {

@@ -3,15 +3,21 @@ package to.rtc.cli.migrate.git;
 import java.io.File;
 import java.io.IOException;
 import java.nio.charset.Charset;
+import java.time.Instant;
 import java.util.ArrayList;
+import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.Formatter;
 import java.util.HashSet;
 import java.util.Iterator;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Map.Entry;
+import java.util.TreeMap;
+import java.util.HashMap;
 import java.util.Properties;
 import java.util.Set;
 import java.util.SortedSet;
@@ -22,21 +28,44 @@ import java.util.regex.Pattern;
 import org.eclipse.jgit.api.AddCommand;
 import org.eclipse.jgit.api.CheckoutCommand;
 import org.eclipse.jgit.api.Git;
+import org.eclipse.jgit.api.ResetCommand.ResetType;
 import org.eclipse.jgit.api.RmCommand;
 import org.eclipse.jgit.api.Status;
+import org.eclipse.jgit.api.errors.EmptyCommitException;
 import org.eclipse.jgit.api.errors.GitAPIException;
+import org.eclipse.jgit.ignore.FastIgnoreRule;
+import org.eclipse.jgit.dircache.DirCache;
+import org.eclipse.jgit.dircache.DirCacheEditor;
+import org.eclipse.jgit.dircache.DirCacheEntry;
 import org.eclipse.jgit.lib.Config;
+import org.eclipse.jgit.lib.Constants;
+import org.eclipse.jgit.lib.FileMode;
+import org.eclipse.jgit.lib.ObjectId;
+import org.eclipse.jgit.lib.ObjectInserter;
 import org.eclipse.jgit.lib.PersonIdent;
+import org.eclipse.jgit.lib.Ref;
+import org.eclipse.jgit.lib.RefUpdate;
+import org.eclipse.jgit.lib.Repository;
 import org.eclipse.jgit.lib.StoredConfig;
+import org.eclipse.jgit.revwalk.RevCommit;
+import org.eclipse.jgit.revwalk.RevObject;
+import org.eclipse.jgit.revwalk.RevTag;
+import org.eclipse.jgit.revwalk.RevWalk;
 import org.eclipse.jgit.storage.file.WindowCacheConfig;
 
+import to.rtc.cli.migrate.BranchPoint;
 import to.rtc.cli.migrate.ChangeSet;
 import to.rtc.cli.migrate.ChangeSet.WorkItem;
+import to.rtc.cli.migrate.FileProperties;
 import to.rtc.cli.migrate.Migrator;
+import to.rtc.cli.migrate.ResumeState;
 import to.rtc.cli.migrate.Tag;
 import to.rtc.cli.migrate.util.CommitCommentTranslator;
 import to.rtc.cli.migrate.util.Files;
 import to.rtc.cli.migrate.util.JazzignoreTranslator;
+import to.rtc.cli.migrate.util.JsonWriter;
+import to.rtc.cli.migrate.zos.SystemDefinitions;
+import to.rtc.cli.migrate.zos.ZosMetadata;
 
 /**
  * Git implementation of a {@link Migrator}.
@@ -49,9 +78,13 @@ public final class GitMigrator implements Migrator {
 	static final List<String> ROOT_IGNORED_ENTRIES = Arrays.asList("/.jazz5", "/.jazzShed", "/.metadata");
 	static final Pattern GITIGNORE_PATTERN = Pattern.compile("(^.*(/|))\\.gitignore$");
 	static final Pattern JAZZIGNORE_PATTERN = Pattern.compile("(^.*(/|))\\.jazzignore$");
+	static final String CHANGE_SET_TRAILER = "EWM-ChangeSet";
+	static final String BASELINE_TRAILER = "EWM-Baseline";
+	static final String BASE_TRAILER = "EWM-Base";
+	static final String SNAPSHOT_TRAILER = "EWM-Snapshot";
 	static final Pattern VALUE_PATTERN = Pattern.compile("^([0-9]+) *(m|mb|k|kb|)$", Pattern.CASE_INSENSITIVE);
 
-	private final Charset defaultCharset;
+	private Charset defaultCharset;
 	private final Set<String> ignoredFileExtensions;
 	private final WindowCacheConfig WindowCacheConfig;
 
@@ -61,12 +94,53 @@ public final class GitMigrator implements Migrator {
 	private PersonIdent defaultIdent;
 	private File rootDir;
 	private CommitCommentTranslator commentTranslator;
+	private IdentityResolver identities;
+	private boolean commitEmptyChangeSets;
+	private boolean changeSetTrailer;
+	private boolean forceAddIgnored;
+	private List<FastIgnoreRule> intentionalIgnores;
+	private final Set<String> migratedChangeSets;
+	// files rewritten while handling removals that must be added, not removed (the root .gitignore)
+	private final Set<String> pendingAdds = new HashSet<String>();
+	private boolean attributesFromEwm;
+	private GitattributesGenerator attributesGenerator;
+	private Collection<FileProperties> propertiesBeforeInit;
+	private final Set<String> executablePaths = new TreeSet<String>();
+	private final Map<String, String> initialState = new TreeMap<String, String>();
+	private String lastCommitId;
+	static final String KEEP_FILE = ".gitkeep";
+	private boolean keepEmptyFolders;
+	private String zosCodePage;
+	private boolean zosMetadata;
+	private SystemDefinitions systemDefinitions = SystemDefinitions.unavailable("not set by the migration");
+	// index-only placeholders for folders that are empty in EWM (never written to the sandbox)
+	private final Set<String> keepFiles = new TreeSet<String>();
+	// UUIDs of the EWM baselines that already have a tag (read from the tag messages)
+	private Set<String> taggedBaselines;
+	// UUIDs of the EWM snapshots that already have a tag
+	private Set<String> taggedSnapshots;
+	// the branch this migration commits to (null: the current or JGit's initial branch)
+	private String branch;
+	// repository of an earlier migration that a new sandbox adds its branch to, as a linked worktree
+	private File branchRepository;
+	// the commit a new branch started at, while the sandbox is checked against it
+	private String branchStart;
+	// Git LFS: files above this size (0: off) and these patterns (lfs.threshold, lfs.patterns)
+	private long lfsThreshold;
+	private final List<String> lfsPatterns = new ArrayList<String>();
+	// files that went to LFS because of their size; they stay there while they exist
+	private final Set<String> lfsPaths = new TreeSet<String>();
+	// the last block generated from the EWM file properties
+	private List<String> ewmAttributes = Collections.emptyList();
+	static final String LFS_BEGIN = "# >>> Git LFS (lfs.patterns, lfs.threshold)";
+	static final String LFS_END = "# <<< Git LFS";
+	static final String LFS_ATTRIBUTES = " filter=lfs diff=lfs merge=lfs -text";
 
 	public GitMigrator(Properties properties) {
-		defaultCharset = Charset.forName("UTF-8");
 		ignoredFileExtensions = new HashSet<String>();
 		WindowCacheConfig = new WindowCacheConfig();
 		commitsAfterClean = 0;
+		migratedChangeSets = new HashSet<String>();
 		initialize(properties);
 	}
 
@@ -210,19 +284,36 @@ public final class GitMigrator implements Migrator {
 		}
 	}
 
-	private void gitCommit(PersonIdent ident, String comment) {
+	private void gitCommit(PersonIdent author, PersonIdent committer, String comment, boolean allowEmpty) {
+		lastCommitId = null;
 		try {
 			// add all untracked files
 			Status status = git.status().call();
+			if (lfsThreshold > 0 && updateLfsPaths(status)) {
+				writeAttributes();
+				pendingAdds.add(".gitattributes");
+			}
 
 			Set<String> toAdd = handleAdded(status);
+			Set<String> toForce = handleIgnoredButVersioned(status);
 			Set<String> toRestore = new HashSet<String>();
 			Set<String> toRemove = handleRemoved(status, toRestore);
+			toAdd.addAll(pendingAdds);
+			toRemove.removeAll(pendingAdds);
+			pendingAdds.clear();
 
 			// execute the git index commands if needed
 			if (!toAdd.isEmpty()) {
 				AddCommand add = git.add();
 				for (String filepattern : toAdd) {
+					add.addFilepattern(filepattern);
+				}
+				add.call();
+			}
+			if (!toForce.isEmpty()) {
+				AddCommand add = git.add()
+						.setWorkingTreeIterator(new ForceAddTreeIterator(git.getRepository(), toForce));
+				for (String filepattern : toForce) {
 					add.addFilepattern(filepattern);
 				}
 				add.call();
@@ -234,6 +325,8 @@ public final class GitMigrator implements Migrator {
 				}
 				rm.call();
 			}
+			markExecutables();
+			syncKeepFiles();
 			if (!toRestore.isEmpty()) {
 				CheckoutCommand checkout = git.checkout();
 				for (String filepattern : toRestore) {
@@ -242,9 +335,15 @@ public final class GitMigrator implements Migrator {
 				checkout.call();
 			}
 
-			// execute commit if something has changed
-			if (!toAdd.isEmpty() || !toRemove.isEmpty()) {
-				git.commit().setMessage(comment).setAuthor(ident).setCommitter(ident).call();
+			// commit what is staged; JGit compares the index with HEAD, so staging that changed nothing (e.g. an
+			// ignored empty folder) does not produce a commit unless one commit per change set is wanted
+			if (!toAdd.isEmpty() || !toForce.isEmpty() || !toRemove.isEmpty() || allowEmpty || keepEmptyFolders) {
+				try {
+					lastCommitId = git.commit().setMessage(comment).setAuthor(author).setCommitter(committer)
+							.setAllowEmpty(allowEmpty).call().getId().name();
+				} catch (EmptyCommitException e) {
+					// nothing changed
+				}
 			}
 
 			++commitsAfterClean;
@@ -270,6 +369,9 @@ public final class GitMigrator implements Migrator {
 		Set<String> toRemove = new HashSet<String>();
 		// go over all deleted files
 		for (String removed : status.getMissing()) {
+			if (isKeepFile(removed)) {
+				continue; // index-only placeholder, see syncKeepFiles
+			}
 			Matcher matcher = GITIGNORE_PATTERN.matcher(removed);
 			if (matcher.matches()) {
 				File jazzignore = new File(rootDir, matcher.group(1).concat(".jazzignore"));
@@ -284,6 +386,53 @@ public final class GitMigrator implements Migrator {
 		}
 		handleJazzignores(toRemove);
 		return toRemove;
+	}
+
+	/**
+	 * Only scm writes to the sandbox during a migration, so an ignored file that is present but not tracked came from
+	 * EWM, where it is versioned; it is added anyway. Exceptions are the scm metadata and what the migration
+	 * properties exclude on purpose (<code>global.gitignore.entries</code>, <code>ignore.file.extensions</code>).
+	 */
+	Set<String> handleIgnoredButVersioned(Status status) {
+		Set<String> toForce = new TreeSet<String>();
+		if (!forceAddIgnored) {
+			return toForce;
+		}
+		for (String ignored : status.getIgnoredNotInIndex()) {
+			if (!isIntentionallyIgnored(ignored)) {
+				toForce.add(ignored);
+			}
+		}
+		return toForce;
+	}
+
+	boolean isIntentionallyIgnored(String path) {
+		if (intentionalIgnores == null) {
+			Set<String> patterns = new LinkedHashSet<String>(ROOT_IGNORED_ENTRIES);
+			parseElements(properties.getProperty("global.gitignore.entries", ""), patterns);
+			for (String extension : getIgnoredFileExtensions()) {
+				patterns.add("*" + extension);
+			}
+			intentionalIgnores = new ArrayList<FastIgnoreRule>();
+			for (String pattern : patterns) {
+				intentionalIgnores.add(new FastIgnoreRule(pattern));
+			}
+		}
+		// a path is excluded when it or one of its parent folders matches
+		for (String candidate = path; candidate != null; candidate = parent(candidate)) {
+			boolean directory = !candidate.equals(path) || new File(rootDir, candidate).isDirectory();
+			for (FastIgnoreRule rule : intentionalIgnores) {
+				if (rule.isMatch(candidate, directory) && rule.getResult()) {
+					return true;
+				}
+			}
+		}
+		return false;
+	}
+
+	private static String parent(String path) {
+		int slash = path.lastIndexOf('/');
+		return slash < 0 ? null : path.substring(0, slash);
 	}
 
 	private Set<String> handleAdded(Status status) {
@@ -311,7 +460,14 @@ public final class GitMigrator implements Migrator {
 				if (matcher.matches()) {
 					File jazzIgnore = new File(rootDir, relativeFileName);
 					String gitignoreFile = matcher.group(1).concat(".gitignore");
-					if (jazzIgnore.exists()) {
+					if (matcher.group(1).isEmpty()) {
+						// the root .gitignore also holds the migration's own entries: only replace the block that
+						// comes from the root .jazzignore
+						updateRootJazzignoreBlock(jazzIgnore.exists() ? JazzignoreTranslator.toGitignore(jazzIgnore)
+								: Collections.<String> emptyList());
+						pendingAdds.add(gitignoreFile);
+						continue;
+					} else if (jazzIgnore.exists()) {
 						// change/add case
 						List<String> ignoreContent = JazzignoreTranslator.toGitignore(jazzIgnore);
 						Files.writeLines(new File(rootDir, gitignoreFile), ignoreContent, getCharset(), false);
@@ -327,6 +483,30 @@ public final class GitMigrator implements Migrator {
 		} catch (IOException e) {
 			throw new RuntimeException("Unable to handle .jazzignore", e);
 		}
+	}
+
+	static final String ROOT_JAZZIGNORE_BEGIN = "# >>> translated from /.jazzignore";
+	static final String ROOT_JAZZIGNORE_END = "# <<< translated from /.jazzignore";
+
+	private void updateRootJazzignoreBlock(List<String> translated) throws IOException {
+		File rootGitignore = new File(rootDir, ".gitignore");
+		List<String> lines = new ArrayList<String>();
+		boolean inBlock = false;
+		for (String line : Files.readLines(rootGitignore, getCharset())) {
+			if (line.equals(ROOT_JAZZIGNORE_BEGIN)) {
+				inBlock = true;
+			} else if (line.equals(ROOT_JAZZIGNORE_END)) {
+				inBlock = false;
+			} else if (!inBlock) {
+				lines.add(line);
+			}
+		}
+		if (!translated.isEmpty()) {
+			lines.add(ROOT_JAZZIGNORE_BEGIN);
+			lines.addAll(translated);
+			lines.add(ROOT_JAZZIGNORE_END);
+		}
+		Files.writeLines(rootGitignore, lines, getCharset(), false);
 	}
 
 	private void handleGlobalFileExtensions(Set<String> addToGitIndex) {
@@ -354,8 +534,11 @@ public final class GitMigrator implements Migrator {
 		StoredConfig config = git.getRepository().getConfig();
 		config.setBoolean("core", null, "ignoreCase", false);
 		config.setString("core", null, "autocrlf", File.separatorChar == '/' ? "input" : "true");
-		config.setBoolean("http", null, "sslverify", false);
 		config.setString("push", null, "default", "simple");
+		if (isLfs()) {
+			// JGit stores LFS content through LfsCleanFilter; git with git-lfs installed uses its own filter
+			config.setBoolean("filter", "lfs", "useJGitBuiltin", true);
+		}
 		fillConfigFromProperties(config);
 		config.save();
 	}
@@ -386,10 +569,29 @@ public final class GitMigrator implements Migrator {
 
 	void initialize(Properties props) {
 		properties = props;
+		defaultCharset = Charset.forName(props.getProperty("file.encoding", "UTF-8").trim());
 		commentTranslator = new CommitCommentTranslator(props);
 		defaultIdent = new PersonIdent(props.getProperty("user.name", "RTC 2 git"),
 				props.getProperty("user.email", "rtc2git@rtc.to"));
+		identities = new IdentityResolver(props, defaultIdent, defaultCharset);
+		commitEmptyChangeSets = Boolean.parseBoolean(props.getProperty("commit.empty.changesets", "true"));
+		changeSetTrailer = Boolean.parseBoolean(props.getProperty("commit.changeset.trailer", "true"));
+		forceAddIgnored = Boolean.parseBoolean(props.getProperty("commit.force.add.ignored", "true"));
+		attributesFromEwm = Boolean.parseBoolean(props.getProperty("gitattributes.from.ewm", "true"));
+		keepEmptyFolders = Boolean.parseBoolean(props.getProperty("keep.empty.folders", "false"));
+		String codePage = props.getProperty("zos.codepage", ZosMetadata.DEFAULT_CODE_PAGE).trim();
+		zosCodePage = codePage.isEmpty() || codePage.equalsIgnoreCase("none") ? null : codePage;
+		zosMetadata = Boolean.parseBoolean(props.getProperty("zos.metadata", "true"));
+		attributesGenerator = new GitattributesGenerator(
+				Boolean.parseBoolean(props.getProperty("gitattributes.working-tree-encoding", "false")), zosCodePage);
+		intentionalIgnores = null;
 		parseElements(props.getProperty("ignore.file.extensions", ""), ignoredFileExtensions);
+		lfsThreshold = parseConfigValue(props.getProperty("lfs.threshold"), 0);
+		lfsPatterns.clear();
+		parseElements(props.getProperty("lfs.patterns", ""), lfsPatterns);
+		if (isLfs()) {
+			LfsCleanFilter.register();
+		}
 		// update window cache config
 		WindowCacheConfig cfg = getWindowCacheConfig();
 		cfg.setPackedGitOpenFiles(
@@ -412,8 +614,34 @@ public final class GitMigrator implements Migrator {
 		return (int) configThreshold;
 	}
 
-	String createTagName(String tagName) {
-		return tagName.replace(' ', '_').replace('[', '_').replace(']', '_');
+	/**
+	 * Turns an EWM baseline name into a valid git tag name.
+	 */
+	static String createTagName(String tagName) {
+		StringBuilder sb = new StringBuilder();
+		for (char c : tagName.trim().toCharArray()) {
+			sb.append(c <= ' ' || c == 0x7f || "~^:?*[]\\".indexOf(c) >= 0 ? '_' : c);
+		}
+		String name = sb.toString().replace("@{", "_{");
+		while (name.contains("..")) {
+			name = name.replace("..", "_.");
+		}
+		while (name.startsWith(".") || name.startsWith("-") || name.startsWith("/")) {
+			name = name.substring(1);
+		}
+		while (name.endsWith(".") || name.endsWith("/")) {
+			name = name.substring(0, name.length() - 1);
+		}
+		if (name.endsWith(".lock")) {
+			name = name + "_";
+		}
+		if (!Repository.isValidRefName(Constants.R_TAGS + name)) {
+			name = name.replace('/', '_');
+		}
+		if (name.isEmpty() || !Repository.isValidRefName(Constants.R_TAGS + name)) {
+			name = "tag_" + Integer.toHexString(tagName.hashCode());
+		}
+		return name;
 	}
 
 	@Override
@@ -423,16 +651,42 @@ public final class GitMigrator implements Migrator {
 			File bareGitDirectory = new File(sandboxRootDirectory, ".git");
 			if (bareGitDirectory.exists()) {
 				git = Git.open(sandboxRootDirectory);
+				String current = git.getRepository().getBranch();
+				if (branch != null && !branch.equals(current)) {
+					throw new IllegalStateException("The sandbox " + sandboxRootDirectory + " is on branch [" + current
+							+ "], not on [" + branch + "]");
+				}
+				checkResumable();
+				readLfsPaths();
 			} else if (sandboxRootDirectory.exists()) {
-				git = Git.init().setDirectory(sandboxRootDirectory).call();
+				git = Git.init().setDirectory(sandboxRootDirectory).setInitialBranch(branch).call();
 			} else {
 				throw new RuntimeException(bareGitDirectory + " does not exist");
 			}
 			getWindowCacheConfig().install();
 			initRootGitignore(sandboxRootDirectory);
 			initRootGitattributes(sandboxRootDirectory);
+			if (propertiesBeforeInit != null) {
+				writeGeneratedFiles(propertiesBeforeInit);
+				propertiesBeforeInit = null;
+			}
 			initConfig();
-			gitCommit(new PersonIdent(defaultIdent, System.currentTimeMillis(), 0), "Initial commit");
+			boolean resumed = git.getRepository().resolve(Constants.HEAD) != null;
+			PersonIdent now = new PersonIdent(defaultIdent, Instant.now(), identities.getZoneId());
+			if (resumed) {
+				gitCommit(now, now, "Update generated files before resuming the migration", false);
+			} else {
+				StringBuilder message = new StringBuilder("Initial commit");
+				if (!initialState.isEmpty()) {
+					// start state of the target workspace, read when resuming an interrupted run
+					message.append('\n');
+					for (Map.Entry<String, String> component : initialState.entrySet()) {
+						message.append('\n').append(BASE_TRAILER).append(": ").append(component.getKey()).append('=')
+								.append(component.getValue());
+					}
+				}
+				gitCommit(now, now, message.toString(), !initialState.isEmpty());
+			}
 		} catch (IOException e) {
 			throw new RuntimeException("Unable to initialize GIT repository", e);
 		} catch (GitAPIException e) {
@@ -443,7 +697,11 @@ public final class GitMigrator implements Migrator {
 	@Override
 	public void close() {
 		if (git != null) {
-			runGitGc();
+			try {
+				runGitGc();
+			} finally {
+				git.close();
+			}
 		}
 		SortedSet<String> existingIgnoredFiles = getExistingIgnoredFiles();
 		if (!existingIgnoredFiles.isEmpty()) {
@@ -459,32 +717,607 @@ public final class GitMigrator implements Migrator {
 			git.gc().call();
 		} catch (GitAPIException e) {
 			e.printStackTrace();
-		} finally {
-			git.close();
 		}
 	}
 
 	@Override
 	public void commitChanges(ChangeSet changeset) {
-		gitCommit(
-				new PersonIdent(changeset.getCreatorName(), changeset.getEmailAddress(), changeset.getCreationDate(),
-						0),
-				getCommitMessage(getWorkItemNumbers(changeset.getWorkItems()), getCommentText(changeset),
-						getWorkItemTexts(changeset.getWorkItems())));
+		String message = getCommitMessage(getWorkItemNumbers(changeset.getWorkItems()), getCommentText(changeset),
+				getWorkItemTexts(changeset.getWorkItems()));
+		String uuid = changeset.getUuid();
+		if (changeSetTrailer && uuid != null) {
+			message = message + "\n\n" + CHANGE_SET_TRAILER + ": " + uuid;
+		}
+		gitCommit(identities.resolve(changeset), identities.resolveCommitter(changeset), message,
+				commitEmptyChangeSets && uuid != null);
+		if (uuid != null) {
+			migratedChangeSets.add(uuid);
+		}
+	}
+
+	@Override
+	public void updateFileProperties(Collection<FileProperties> files) {
+		if (keepEmptyFolders) {
+			updateKeepFiles(files);
+		}
+		if (!attributesFromEwm && !zosMetadata) {
+			return;
+		}
+		if (rootDir == null) {
+			propertiesBeforeInit = new ArrayList<FileProperties>(files);
+			return;
+		}
+		try {
+			writeGeneratedFiles(files);
+		} catch (IOException e) {
+			throw new RuntimeException("Unable to write the files generated from EWM properties", e);
+		}
+	}
+
+	@Override
+	public void setSystemDefinitions(SystemDefinitions definitions) {
+		systemDefinitions = definitions;
+	}
+
+	private void writeGeneratedFiles(Collection<FileProperties> files) throws IOException {
+		if (attributesFromEwm) {
+			writeGeneratedAttributes(files);
+		}
+		if (zosMetadata) {
+			writeZosMetadata(files);
+		}
+	}
+
+	/**
+	 * Writes <code>.ewm/zos-metadata.json</code> when it changed; removes it when no file has z/OS metadata (any
+	 * more).
+	 */
+	private void writeZosMetadata(Collection<FileProperties> files) throws IOException {
+		File file = new File(rootDir, ZosMetadata.PATH);
+		Map<String, Object> document = ZosMetadata.build(files, systemDefinitions,
+				zosCodePage == null ? ZosMetadata.DEFAULT_CODE_PAGE : zosCodePage);
+		if (document == null) {
+			if (file.exists()) {
+				java.nio.file.Files.delete(file.toPath());
+			}
+			return;
+		}
+		byte[] content = JsonWriter.toString(document).getBytes(StandardCharsets.UTF_8);
+		if (file.exists() && Arrays.equals(content, java.nio.file.Files.readAllBytes(file.toPath()))) {
+			return;
+		}
+		file.getParentFile().mkdirs();
+		java.nio.file.Files.write(file.toPath(), content);
+	}
+
+	/**
+	 * Replaces the generated block of the root <code>.gitattributes</code>; lines from the <code>gitattributes</code>
+	 * property stay in front of it.
+	 */
+	private void writeGeneratedAttributes(Collection<FileProperties> files) throws IOException {
+		executablePaths.clear();
+		for (FileProperties file : files) {
+			if (!file.isFolder() && file.isExecutable()) {
+				executablePaths.add(file.getPath());
+			}
+		}
+		ewmAttributes = attributesGenerator.generate(files);
+		writeAttributes();
+	}
+
+	/**
+	 * Writes the root <code>.gitattributes</code>: the lines of the <code>gitattributes</code> property, the block
+	 * generated from the EWM file properties, then the Git LFS block (later lines win).
+	 */
+	private void writeAttributes() throws IOException {
+		File gitattributes = new File(rootDir, ".gitattributes");
+		List<String> existing = Files.readLines(gitattributes, getCharset());
+		List<String> lines = new ArrayList<String>();
+		List<String> oldEwm = new ArrayList<String>();
+		String block = null;
+		for (String line : existing) {
+			if (line.equals(GitattributesGenerator.BEGIN) || line.equals(LFS_BEGIN)) {
+				block = line;
+			} else if (line.equals(GitattributesGenerator.END) || line.equals(LFS_END)) {
+				block = null;
+			} else if (block == null) {
+				lines.add(line);
+			} else if (block.equals(GitattributesGenerator.BEGIN)) {
+				oldEwm.add(line);
+			}
+		}
+		List<String> generated = attributesFromEwm ? ewmAttributes : oldEwm;
+		if (!generated.isEmpty()) {
+			lines.add(GitattributesGenerator.BEGIN);
+			lines.addAll(generated);
+			lines.add(GitattributesGenerator.END);
+		}
+		if (isLfs() && (!lfsPatterns.isEmpty() || !lfsPaths.isEmpty())) {
+			lines.add(LFS_BEGIN);
+			for (String pattern : lfsPatterns) {
+				lines.add(pattern + LFS_ATTRIBUTES);
+			}
+			for (String path : lfsPaths) {
+				lines.add("/" + GitattributesGenerator.escape(path) + LFS_ATTRIBUTES);
+			}
+			lines.add(LFS_END);
+		}
+		if (!lines.equals(existing)) {
+			Files.writeLines(gitattributes, lines, getCharset(), false);
+		}
+	}
+
+	private boolean isLfs() {
+		return lfsThreshold > 0 || !lfsPatterns.isEmpty();
+	}
+
+	/**
+	 * Files above <code>lfs.threshold</code> that are about to be committed go to LFS; files that no longer exist
+	 * leave the list.
+	 *
+	 * @return whether the list changed
+	 */
+	private boolean updateLfsPaths(Status status) {
+		boolean changed = false;
+		for (Iterator<String> it = lfsPaths.iterator(); it.hasNext();) {
+			if (!new File(rootDir, it.next()).isFile()) {
+				it.remove();
+				changed = true;
+			}
+		}
+		Set<String> candidates = new TreeSet<String>(status.getUntracked());
+		candidates.addAll(status.getModified());
+		if (forceAddIgnored) {
+			for (String ignored : status.getIgnoredNotInIndex()) {
+				if (!isIntentionallyIgnored(ignored)) {
+					candidates.add(ignored);
+				}
+			}
+		}
+		for (String path : candidates) {
+			File file = new File(rootDir, path);
+			if (!lfsPaths.contains(path) && file.isFile() && file.length() > lfsThreshold) {
+				lfsPaths.add(path);
+				changed = true;
+			}
+		}
+		return changed;
+	}
+
+	/**
+	 * On resume: the files that went to LFS because of their size, from the LFS block of <code>.gitattributes</code>.
+	 */
+	private void readLfsPaths() throws IOException {
+		lfsPaths.clear();
+		boolean inBlock = false;
+		for (String line : Files.readLines(new File(rootDir, ".gitattributes"), getCharset())) {
+			if (line.equals(LFS_BEGIN)) {
+				inBlock = true;
+			} else if (line.equals(LFS_END)) {
+				inBlock = false;
+			} else if (inBlock && line.endsWith(LFS_ATTRIBUTES)) {
+				String pattern = line.substring(0, line.length() - LFS_ATTRIBUTES.length());
+				if (!lfsPatterns.contains(pattern) && pattern.startsWith("/")) {
+					lfsPaths.add(GitattributesGenerator.unescape(pattern.substring(1)));
+				}
+			}
+		}
+	}
+
+	private void updateKeepFiles(Collection<FileProperties> files) {
+		Set<String> emptyFolders = new TreeSet<String>();
+		Set<String> parents = new HashSet<String>();
+		for (FileProperties item : files) {
+			if (item.isFolder()) {
+				emptyFolders.add(item.getPath());
+			}
+			for (String parent = parent(item.getPath()); parent != null; parent = parent(parent)) {
+				parents.add(parent);
+			}
+		}
+		emptyFolders.removeAll(parents);
+		keepFiles.clear();
+		for (String folder : emptyFolders) {
+			keepFiles.add(folder + "/" + KEEP_FILE);
+		}
+	}
+
+	private static boolean isKeepFile(String path) {
+		return path.equals(KEEP_FILE) || path.endsWith("/" + KEEP_FILE);
+	}
+
+	/**
+	 * Adds the placeholders of empty EWM folders to the index and removes those of folders that are no longer empty.
+	 */
+	private void syncKeepFiles() throws IOException {
+		if (!keepEmptyFolders) {
+			return;
+		}
+		Repository repository = git.getRepository();
+		DirCache dirCache = repository.lockDirCache();
+		try (ObjectInserter inserter = repository.newObjectInserter()) {
+			final ObjectId empty = inserter.insert(Constants.OBJ_BLOB, new byte[0]);
+			inserter.flush();
+			DirCacheEditor editor = dirCache.editor();
+			boolean changed = false;
+			for (int i = 0; i < dirCache.getEntryCount(); i++) {
+				String path = dirCache.getEntry(i).getPathString();
+				if (isKeepFile(path) && !keepFiles.contains(path) && !new File(rootDir, path).exists()) {
+					editor.add(new DirCacheEditor.DeletePath(path));
+					changed = true;
+				}
+			}
+			for (String path : keepFiles) {
+				if (dirCache.getEntry(path) == null) {
+					editor.add(new DirCacheEditor.PathEdit(path) {
+						@Override
+						public void apply(DirCacheEntry entry) {
+							entry.setFileMode(FileMode.REGULAR_FILE);
+							entry.setObjectId(empty);
+							entry.setLength(0);
+							// not in the sandbox on purpose: keep git status clean
+							entry.setAssumeValid(true);
+						}
+					});
+					changed = true;
+				}
+			}
+			if (changed) {
+				editor.finish();
+				dirCache.write();
+				dirCache.commit();
+			}
+		} finally {
+			dirCache.unlock();
+		}
+	}
+
+	/**
+	 * EWM's executable flag becomes the git file mode, also where the file system has no executable bit.
+	 */
+	private void markExecutables() throws IOException {
+		if (executablePaths.isEmpty()) {
+			return;
+		}
+		DirCache dirCache = git.getRepository().lockDirCache();
+		try {
+			boolean changed = false;
+			for (String path : executablePaths) {
+				new File(rootDir, path).setExecutable(true);
+				DirCacheEntry entry = dirCache.getEntry(path);
+				if (entry != null && !FileMode.EXECUTABLE_FILE.equals(entry.getFileMode())) {
+					entry.setFileMode(FileMode.EXECUTABLE_FILE);
+					changed = true;
+				}
+			}
+			if (changed) {
+				dirCache.write();
+				dirCache.commit();
+			}
+		} finally {
+			dirCache.unlock();
+		}
+	}
+
+	@Override
+	public String getLastCommitId() {
+		return lastCommitId;
+	}
+
+	@Override
+	public void setInitialState(Map<String, String> newestChangeSets) {
+		initialState.clear();
+		initialState.putAll(newestChangeSets);
+	}
+
+	@Override
+	public ResumeState inspectResume(File sandboxRootDirectory) {
+		if (!new File(sandboxRootDirectory, ".git").exists()) {
+			return ResumeState.NEW;
+		}
+		try (Git existing = Git.open(sandboxRootDirectory)) {
+			if (existing.getRepository().resolve(Constants.HEAD) == null) {
+				return ResumeState.NEW;
+			}
+			Set<String> migrated = new HashSet<String>();
+			Map<String, String> base = new HashMap<String, String>();
+			for (RevCommit commit : existing.log().call()) {
+				migrated.addAll(commit.getFooterLines(CHANGE_SET_TRAILER));
+				for (String line : commit.getFooterLines(BASE_TRAILER)) {
+					int equals = line.indexOf('=');
+					if (equals > 0) {
+						base.put(line.substring(0, equals).trim(), line.substring(equals + 1).trim());
+					}
+				}
+			}
+			return new ResumeState(true, migrated, base);
+		} catch (IOException | GitAPIException e) {
+			throw new RuntimeException("Unable to read the git history of " + sandboxRootDirectory, e);
+		}
+	}
+
+	@Override
+	public boolean isMigrated(String changeSetUuid) {
+		return migratedChangeSets.contains(changeSetUuid);
+	}
+
+	/**
+	 * An existing repository is resumed: its working tree must be clean (otherwise an earlier run stopped between
+	 * accepting a change set and committing it), and the change sets it already contains are remembered.
+	 */
+	private void checkResumable() throws GitAPIException, IOException {
+		if (git.getRepository().resolve(Constants.HEAD) == null) {
+			return;
+		}
+		Status status = git.status().call();
+		Set<String> pending = new TreeSet<String>(status.getUncommittedChanges());
+		pending.addAll(status.getUntracked());
+		for (String missing : status.getMissing()) {
+			if (isKeepFile(missing)) {
+				pending.remove(missing);
+			}
+		}
+		if (!pending.isEmpty() && branchStart != null) {
+			throw new IllegalStateException("The target workspace loaded into " + rootDir
+					+ " differs from the branch point " + branchStart + " in " + pending
+					+ ". The stream's history matched the commit, so its content should too; check the migration"
+					+ " properties and file properties of both migrations.");
+		}
+		if (!pending.isEmpty()) {
+			throw new IllegalStateException("The sandbox " + rootDir + " has uncommitted changes " + pending
+					+ ". A previous migration probably stopped after accepting a change set but before committing it."
+					+ " Commit or discard these changes, then run the migration again.");
+		}
+		for (RevCommit commit : git.log().call()) {
+			migratedChangeSets.addAll(commit.getFooterLines(CHANGE_SET_TRAILER));
+		}
+	}
+
+	/**
+	 * @param name
+	 *            branch to commit to: the initial branch of a new repository, the branch an existing sandbox must be on,
+	 *            or the new branch of {@link #setBranchRepository(File)}
+	 */
+	public void setBranch(String name) {
+		if (name != null && !Repository.isValidRefName(Constants.R_HEADS + name)) {
+			throw new IllegalArgumentException("[" + name + "] is not a valid branch name");
+		}
+		branch = name;
+	}
+
+	/**
+	 * @param repository
+	 *            sandbox or git directory of an earlier migration; a sandbox without repository becomes a linked
+	 *            worktree of it with a new branch
+	 */
+	public void setBranchRepository(File repository) {
+		branchRepository = repository;
+	}
+
+	@Override
+	public Map<String, List<BranchPoint.Commit>> readBranches(File sandboxRootDirectory) {
+		if (branchRepository == null || new File(sandboxRootDirectory, ".git").exists()) {
+			return null;
+		}
+		if (branch == null) {
+			throw new IllegalStateException("Name the branch to add to " + branchRepository);
+		}
+		Map<String, List<BranchPoint.Commit>> branches = new TreeMap<String, List<BranchPoint.Commit>>();
+		try (Repository repository = openBranchRepository(); RevWalk walk = new RevWalk(repository)) {
+			if (repository.exactRef(Constants.R_HEADS + branch) != null) {
+				throw new IllegalStateException("Branch [" + branch + "] exists already in " + branchRepository);
+			}
+			for (Ref ref : repository.getRefDatabase().getRefsByPrefix(Constants.R_HEADS)) {
+				List<BranchPoint.Commit> commits = new ArrayList<BranchPoint.Commit>();
+				for (RevCommit commit = walk.parseCommit(ref.getObjectId()); commit != null;) {
+					List<String> changeSets = commit.getFooterLines(CHANGE_SET_TRAILER);
+					Map<String, String> base = new HashMap<String, String>();
+					for (String line : commit.getFooterLines(BASE_TRAILER)) {
+						int equals = line.indexOf('=');
+						if (equals > 0) {
+							base.put(line.substring(0, equals).trim(), line.substring(equals + 1).trim());
+						}
+					}
+					commits.add(new BranchPoint.Commit(commit.name(),
+							changeSets.isEmpty() ? null : changeSets.get(changeSets.size() - 1), base));
+					commit = commit.getParentCount() == 0 ? null : walk.parseCommit(commit.getParent(0));
+				}
+				Collections.reverse(commits);
+				branches.put(ref.getName().substring(Constants.R_HEADS.length()), commits);
+			}
+		} catch (IOException e) {
+			throw new RuntimeException("Unable to read the branches of " + branchRepository, e);
+		}
+		return branches;
+	}
+
+	private Repository openBranchRepository() throws IOException {
+		try (Git opened = Git.open(branchRepository)) {
+			Repository repository = opened.getRepository();
+			// the main repository also when given a linked worktree of it
+			File common = repository.getCommonDirectory();
+			return Git.open(common != null ? common : repository.getDirectory()).getRepository();
+		}
+	}
+
+	/**
+	 * Makes the sandbox a linked worktree of the branch repository, on a new branch at the commit; the working tree
+	 * is the target workspace loaded at that commit's configuration. Files the migration generates (they are not in
+	 * EWM) are restored from the commit; anything else that differs makes {@link #init(File)} fail.
+	 */
+	@Override
+	public void startBranch(File sandboxRootDirectory, String commitId) {
+		File sandbox = sandboxRootDirectory.getAbsoluteFile();
+		try (Repository repository = openBranchRepository()) {
+			File common = repository.getDirectory().getAbsoluteFile();
+			String id = branch.replaceAll("[^A-Za-z0-9._-]", "-");
+			File admin = new File(common, "worktrees/" + id);
+			for (int i = 2; admin.exists(); i++) {
+				admin = new File(common, "worktrees/" + id + i);
+			}
+			if (!admin.mkdirs()) {
+				throw new IOException("Unable to create " + admin);
+			}
+			write(new File(admin, "commondir"), "../..\n");
+			write(new File(admin, "gitdir"), new File(sandbox, ".git").getPath() + "\n");
+			write(new File(admin, "HEAD"), "ref: " + Constants.R_HEADS + branch + "\n");
+			if (commitId != null) {
+				RefUpdate update = repository.updateRef(Constants.R_HEADS + branch);
+				update.setNewObjectId(ObjectId.fromString(commitId));
+				update.setExpectedOldObjectId(ObjectId.zeroId());
+				update.setRefLogMessage("branch: Created from " + commitId + " (rtc2git branch point)", false);
+				RefUpdate.Result result = update.update();
+				if (result != RefUpdate.Result.NEW) {
+					throw new IOException("Unable to create branch [" + branch + "]: " + result);
+				}
+			}
+			write(new File(sandbox, ".git"), "gitdir: " + admin.getPath() + "\n");
+		} catch (IOException e) {
+			throw new RuntimeException("Unable to add branch [" + branch + "] to " + branchRepository, e);
+		}
+		if (commitId == null) {
+			return;
+		}
+		branchStart = commitId;
+		try (Git worktree = Git.open(sandbox)) {
+			worktree.reset().setMode(ResetType.MIXED).setRef(Constants.HEAD).call();
+			CheckoutCommand restore = worktree.checkout();
+			boolean any = false;
+			for (String missing : worktree.status().call().getMissing()) {
+				if (isGenerated(sandbox, missing)) {
+					restore.addPath(missing);
+					any = true;
+				}
+			}
+			if (any) {
+				restore.call();
+			}
+		} catch (IOException | GitAPIException e) {
+			throw new RuntimeException("Unable to check out the branch point " + commitId, e);
+		}
+	}
+
+	/**
+	 * @return whether the migration writes the file, as opposed to scm loading it from EWM
+	 */
+	static boolean isGenerated(File root, String path) {
+		if (path.equals(".gitignore") || path.equals(".gitattributes") || path.equals(ZosMetadata.PATH)) {
+			return true;
+		}
+		Matcher matcher = GITIGNORE_PATTERN.matcher(path);
+		return matcher.matches() && new File(root, matcher.group(1) + ".jazzignore").isFile();
+	}
+
+	private static void write(File file, String content) throws IOException {
+		java.nio.file.Files.write(file.toPath(), content.getBytes(StandardCharsets.UTF_8));
 	}
 
 	@Override
 	public void createTag(Tag tag) {
 		String tagName = tag.getName();
-		if (tagName != null && !tagName.isEmpty()) {
-			try {
-				git.tag().setTagger(defaultIdent).setName(createTagName(tagName)).call();
-			} catch (RuntimeException e) {
-				throw e;
-			} catch (Exception e) {
-				throw new RuntimeException("Unable to tag", e);
+		if (tagName == null || tagName.isEmpty()) {
+			return;
+		}
+		try {
+			Repository repository = git.getRepository();
+			String snapshot = tag.getSnapshotUuid();
+			if (snapshot != null) {
+				if (getTaggedSnapshots().contains(snapshot)) {
+					return; // tagged by an earlier run
+				}
+			} else {
+				for (String baseline : tag.getBaselineUuids()) {
+					if (getTaggedBaselines().contains(baseline)) {
+						return; // tagged by an earlier run
+					}
+				}
+			}
+			ObjectId head = repository.resolve(Constants.HEAD);
+			String baseName = createTagName(tagName);
+			String name = baseName;
+			Ref existing;
+			for (int i = 2; (existing = repository.exactRef(Constants.R_TAGS + name)) != null; i++) {
+				if (head != null && head.equals(peeled(repository, existing))) {
+					// re-run of an already tagged baseline
+					return;
+				}
+				name = baseName + "_" + i;
+			}
+			long created = tag.getCreationDate();
+			Instant when = (created <= 0 || created == Long.MAX_VALUE) ? Instant.now() : Instant.ofEpochMilli(created);
+			StringBuilder message = new StringBuilder(snapshot != null ? "EWM snapshot: " : "EWM baseline: ")
+					.append(tag.getOriginalName());
+			if (snapshot != null || !tag.getBaselineUuids().isEmpty()) {
+				message.append('\n');
+				if (snapshot != null) {
+					message.append('\n').append(SNAPSHOT_TRAILER).append(": ").append(snapshot);
+				}
+				for (String uuid : tag.getBaselineUuids()) {
+					message.append('\n').append(BASELINE_TRAILER).append(": ").append(uuid);
+				}
+			}
+			git.tag().setName(name).setAnnotated(true).setMessage(message.toString())
+					.setTagger(new PersonIdent(defaultIdent, when, identities.getZoneId())).call();
+			if (snapshot != null) {
+				getTaggedSnapshots().add(snapshot);
+			} else {
+				getTaggedBaselines().addAll(tag.getBaselineUuids());
+			}
+		} catch (RuntimeException e) {
+			throw e;
+		} catch (Exception e) {
+			throw new RuntimeException("Unable to tag", e);
+		}
+	}
+
+	private Set<String> getTaggedBaselines() throws IOException {
+		readTagTrailers();
+		return taggedBaselines;
+	}
+
+	private Set<String> getTaggedSnapshots() throws IOException {
+		readTagTrailers();
+		return taggedSnapshots;
+	}
+
+	/**
+	 * Reads which baselines and snapshots the existing tags represent (the baselines listed in a snapshot tag do not
+	 * count as tagged baselines).
+	 */
+	private void readTagTrailers() throws IOException {
+		if (taggedBaselines != null) {
+			return;
+		}
+		taggedBaselines = new HashSet<String>();
+		taggedSnapshots = new HashSet<String>();
+		Repository repository = git.getRepository();
+		try (RevWalk walk = new RevWalk(repository)) {
+			for (Ref ref : repository.getRefDatabase().getRefsByPrefix(Constants.R_TAGS)) {
+				RevObject object = walk.parseAny(ref.getObjectId());
+				if (!(object instanceof RevTag)) {
+					continue;
+				}
+				Set<String> baselines = new HashSet<String>();
+				String snapshot = null;
+				for (String line : ((RevTag) object).getFullMessage().split("\n")) {
+					if (line.startsWith(BASELINE_TRAILER + ": ")) {
+						baselines.add(line.substring(BASELINE_TRAILER.length() + 2).trim());
+					} else if (line.startsWith(SNAPSHOT_TRAILER + ": ")) {
+						snapshot = line.substring(SNAPSHOT_TRAILER.length() + 2).trim();
+					}
+				}
+				if (snapshot != null) {
+					taggedSnapshots.add(snapshot);
+				} else {
+					taggedBaselines.addAll(baselines);
+				}
 			}
 		}
+	}
+
+	private static ObjectId peeled(Repository repository, Ref ref) throws IOException {
+		Ref peeled = repository.getRefDatabase().peel(ref);
+		return peeled.getPeeledObjectId() != null ? peeled.getPeeledObjectId() : peeled.getObjectId();
 	}
 
 	private void fillConfigFromProperties(Config config) {

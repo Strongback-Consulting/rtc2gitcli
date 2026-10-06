@@ -1,0 +1,63 @@
+#!/bin/sh
+# Exports the z/OS system definitions (data set definitions, translators, language definitions) of a
+# project area to XML with the Build System Toolkit's Ant tasks; the input of ewm2zbuilder.
+#
+# Usage: tools/export-sysdefs -t <buildtoolkit-dir> -r <repository-uri> -u <user> -p <project area> -o <export.xml>
+#
+#   -t  folder with the Build System Toolkit jars (com.ibm.team.enterprise.zos.systemdefinition.toolkit_*.jar)
+#   -r  repository URI, for example https://host:9443/ccm
+#   -u  user ID; the password is asked for (not echoed, not on the command line)
+#   -p  project area that owns the system definitions
+#   -o  export file to write
+#
+# Needs Apache Ant 1.10+ and Java 17+ on the PATH.
+set -eu
+
+TOOLKIT= REPO= USER_ID= PROJECT_AREA= OUT=
+while getopts t:r:u:p:o: opt; do
+  case $opt in
+    t) TOOLKIT=$OPTARG ;; r) REPO=$OPTARG ;; u) USER_ID=$OPTARG ;; p) PROJECT_AREA=$OPTARG ;; o) OUT=$OPTARG ;;
+    *) sed -n '2,13p' "$0" >&2; exit 2 ;;
+  esac
+done
+for required in TOOLKIT REPO USER_ID PROJECT_AREA OUT; do
+  eval "value=\${$required}"
+  [ -n "$value" ] || { echo "missing option for $required (see $0 header)" >&2; exit 2; }
+done
+ls "$TOOLKIT"/com.ibm.team.enterprise.zos.systemdefinition.toolkit_*.jar >/dev/null 2>&1 \
+  || { echo "no Build System Toolkit jars in $TOOLKIT" >&2; exit 1; }
+command -v ant >/dev/null || { echo "Apache Ant not found on the PATH" >&2; exit 1; }
+
+WORK=$(mktemp -d)
+trap 'rm -rf "$WORK"' EXIT INT TERM
+OUT_ABS=$(cd "$(dirname "$OUT")" && pwd)/$(basename "$OUT")
+
+cat > "$WORK/export.xml" <<'EOF'
+<project name="export-sysdefs" default="export"
+         xmlns:ld="antlib:com.ibm.team.enterprise.zos.systemdefinition.toolkit">
+  <target name="export">
+    <ld:init repositoryAddress="${repo}" userId="${user}" password="${password}" projectArea="${projectArea}"/>
+    <ld:export file="${out}"/>
+    <ld:term/>
+  </target>
+</project>
+EOF
+
+# the password goes to Ant in a private properties file, never on a command line
+umask 077
+printf 'Password for %s at %s: ' "$USER_ID" "$REPO" >&2
+stty -echo 2>/dev/null || true
+IFS= read -r PASSWORD || true
+stty echo 2>/dev/null || true
+printf '\n' >&2
+{
+  printf 'repo=%s\n' "$REPO"
+  printf 'user=%s\n' "$USER_ID"
+  printf 'projectArea=%s\n' "$PROJECT_AREA"
+  printf 'out=%s\n' "$OUT_ABS"
+  printf 'password=%s\n' "$(printf '%s' "$PASSWORD" | sed 's/\\/\\\\/g')"
+} > "$WORK/login.properties"
+unset PASSWORD
+
+ant -noinput -lib "$TOOLKIT" -propertyfile "$WORK/login.properties" -f "$WORK/export.xml"
+echo "Exported the system definitions of [$PROJECT_AREA] to $OUT_ABS"

@@ -1,71 +1,188 @@
-= Tool to migrate from IBM RTC to Git
+= rtc2gitcli: migrate IBM EWM (RTC) history to Git
 :project-full-path: rtcTo/rtc2gitcli
 :github-branch: master
-:rtcversion: 6.0.4
-:rtc2gitwiki: https://github.com/rtcTo/rtc2git/wiki
 :rtc2gitcliwiki: https://github.com/rtcTo/rtc2gitcli/wiki
+:toc: macro
 image:https://img.shields.io/badge/license-MIT-blue.svg["MIT License", link="https://github.com/{project-full-path}/blob/{github-branch}/LICENSE"]
-image:https://img.shields.io/badge/Java-8-blue.svg["Supported Versions", link="https://travis-ci.org/{project-full-path}"]
+image:https://img.shields.io/badge/Java-17-blue.svg["Java 17"]
+image:https://img.shields.io/badge/EWM-7.2-blue.svg["IBM Engineering Workflow Management 7.2"]
 
-A tool made for migrating code from an existing https://jazz.net/products/rational-team-concert/[IBM RTC] into a Git repository.
-Inspired by https://github.com/{project-full-path}[rtc2git], but written in Java and hopefully faster. It is implemented as `scm cli` plugin.
+`rtc2gitcli` migrates the source control history of https://www.ibm.com/products/engineering-workflow-management[IBM Engineering Workflow Management (EWM)], formerly Rational Team Concert (RTC), into Git.
+It is a plugin for IBM's `scm` command line that adds the subcommand `migrate-to-git`. It was inspired by https://github.com/rtcTo/rtc2git[rtc2git].
 
+The plugin replays a stream's history in an `scm` sandbox. It accepts one change set at a time into a target workspace and commits the result with https://www.eclipse.org/jgit/[JGit]. Every Git commit is therefore exactly what `scm load` writes for that point in the history.
 
-== Prerequirements
-- *https://jazz.net/downloads/rational-team-concert/releases/{rtcversion}?p=allDownloads[SCM Tools]* from IBM. To avoid an
-  account creation on jazz.net site, you could use http://bugmenot.com/[bugmenot] (see also wiki page ({rtc2gitwiki}/configure-RTC-CLI[configure RTC CLI])
-- Eclipse configured with scm tools as target platform (see wiki {rtc2gitcliwiki}/configure-target-platform[configure scm tools target platform])
+toc::[]
 
-== Usage
-- create an source RTC workspace with flow target and components as wanted -> `SOURCE_WORKSPACE`
-- create an target RTC workspace with `SOURCE_WORKPSACE` as flow target -> `TARGET_WORKSPACE`
-- check comments at {rtc2gitcliwiki}/configure-rtc-workspaces[configure rtc workspaces]
-- open shell or cmd
-- step into the target directory
-- load the initial target workspace:
+== What it migrates
+
+[cols="1,2"]
+|===
+|EWM |Git
+
+|Change set
+|One commit, even when only properties changed. Author and dates come from EWM, the comment and work items form the message (configurable), and an `EWM-ChangeSet: <uuid>` trailer links back to EWM.
+
+|Delivery order
+|Commits follow the order in which each component received its change sets, not their creation order.
+
+|Baselines, snapshots
+|Annotated tags (filtered by name), with the EWM UUIDs in the tag message.
+
+|Streams
+|One branch per stream in one repository. A branch starts where its history leaves the branches already migrated. See link:docs/streams-as-branches.md[].
+
+|Line delimiters, binary content types, executable flag
+|A generated `.gitattributes` block and the file mode, so a checkout reproduces `scm load` byte for byte.
+
+|`.jazzignore`
+|`.gitignore`. Files that EWM versions despite an ignore pattern are committed anyway.
+
+|Empty folders
+|Optional `.gitkeep` files (`keep.empty.folders`).
+
+|Large files
+|Optional Git LFS (`lfs.threshold`, `lfs.patterns`).
+
+|z/OS language and data set definitions, build variables, code pages
+|`.ewm/zos-metadata.json` and `zos-working-tree-encoding` attributes. A DBB zBuilder configuration is generated from them. See link:docs/zos-migration.md[].
+|===
+
+== Requirements
+
+* *EWM 7.2 SCM Tools* (the `scm` command line, from the EWM download page). The 7.2 tools run on Java 17.
+** On Apple silicon without Rosetta, the bundled x86_64 JRE does not start. Run `eclipse/plugins/org.eclipse.equinox.launcher_*.jar` with a local Java 17 instead, as the `eclipse/scm` script does.
+** z/OS migrations need the SCM Tools *with Enterprise Extensions*. `tools/assemble-ee-scmtools.sh` builds them from the EWM Build System Toolkit repository.
+* A user who can read the streams and create repository workspaces.
+* For the z/OS tooling: the git command line, Python 3.11+ with https://docs.astral.sh/uv/[uv], and Apache Ant (only to export the system definitions).
+
+== Build and install
+
+The `com.ibm.team.*` bundles are not on Maven Central. The build uses a local SCM Tools copy as its target platform:
 
 [source,bash]
 ----
-scm load -r <uri> -u <username> -P <password> <TARGET_WORKSPACE>
+export SCMTOOLS_HOME=<scmtools>              # folder that contains eclipse/plugins
+./mvnw verify                                # compile, run the tests, build the bundle
+tools/install-scmtools-plugin.sh <scmtools>  # register the bundle in that SCM Tools copy
+<scmtools>/eclipse/scm help migrate-to-git
 ----
 
-Execute the actual migration:
+EWM 7.x starts its bundles through `simpleconfigurator`, so the plugin must be registered in `bundles.info`; the `dropins/` folder is ignored. The install script does this. That also fixes the old "unknown subcommand" problem of RTC 6 and later.
+
+== Migrate a stream
+
+Log in once and let `scm` keep the credentials. No password appears on later command lines:
 
 [source,bash]
 ----
-scm migrate-to-git -r <uri> -u <username> -P <password> -m <migration.properties> <SOURCE_WORKSPACE> <TARGET_WORKSPACE>
+scm login -r https://ewm.example.com:9443/ccm -u <user> -n ewm -c
 ----
 
-== How does it work?
-1. It initalizes an empty git repository and clones it
-2. In this repository, it loads `TARGET_WORKSPACE` RTC workspace
-3. Every change set is accepted
-4. If there is a baseline on the change set, a tag is created on git
-5. The change set is committed to git
+Then migrate. `--stream` creates the two repository workspaces the migration needs if they do not exist yet:
 
-=== Setup Eclipse development environment
-In order to enhance the the migration tool, fix a bug that you may encounter or simply want to run it from your eclipse, here are the steps to set up a development environment:
+* a *source* workspace that flows with the stream;
+* a *target* workspace that starts at each component's initial baseline.
 
-- Import Code Style (Window->Preferences->Java->Code Style->Formatter) `eclipse-rtccli-format-settings.xml` in order to have a common coding style (you can skip this step if you only want to run it)
-- Configure SCMTools Target Platform described here in the {rtc2gitcliwiki}/configure-target-platform[wiki]. Point to the folder where your `scm.exe`/`lscm.bat` is
-  (If you use eclipse classic aka non javaee eclipse, install the Eclipse Plugin Development Tools as described {rtc2gitcliwiki}/configure-target-platform#help---there-is-no-target-platform[here])
-- Clone this repo and import it in eclipse as maven project
-- Open `pom.xml` and follow the hint to install the missing maven connector
-- Update maven project using [ALT]+[F5]
-- By this point the project shouldnt contain any errors (make sure you have still your created target platform in window preference selected)
-- You should have an launch-configuration named rtc2git -> start it
-- In your console window you should see _"Help for: scm migrate-to-git"_
-- Open the launch-config and edit the command in arguments/program arguments
+It then loads the target workspace into the sandbox:
 
-In case you use RTC Version 6+ (and have the error Problem running 'help', unknown Subcommand...), please follow the instructions of this https://github.com/rtcTo/rtc2gitcli/issues/44#issuecomment-396727582[issue-comment] in order to run rtc2gitcli.
+[source,bash]
+----
+mkdir -p sandbox/.jazz5        # a new sandbox needs an empty .jazz5 folder for -d
+scm migrate-to-git -r ewm -m migration.properties --stream "My Stream" -b main -d sandbox \
+    my-stream-source my-stream-target
+----
 
-== Wiki
-For more details {rtc2gitcliwiki}[visit our wiki]
+The Git repository is the sandbox itself. Push it when the migration is done:
 
-== Links for JGit
-- http://download.eclipse.org/jgit/docs/jgit-3.3.0.201403021825-r/apidocs/?d[api docs]
-- https://github.com/centic9/jgit-cookbook[jgit cookbook]
-- http://wiki.eclipse.org/JGit/User_Guide[User Guide]
+[source,bash]
+----
+git -C sandbox remote add origin <url>
+git -C sandbox push origin --all && git -C sandbox push origin --tags
+git -C sandbox lfs push --all origin    # only with lfs.* enabled
+----
+
+Before migrating, `-L` lists the baselines and change sets without changing anything.
+
+To use workspaces you set up yourself, leave out `--stream`, load the target workspace with `scm load` and run `migrate-to-git` inside that sandbox. The target workspace must flow with the source workspace and contain the components at the state the history should start from.
+
+=== Options
+
+[cols="1,3"]
+|===
+|`-r`, `-u`, `-P`, `--certificate`, ... |The usual `scm` login options. Prefer a nickname from `scm login -c`.
+|`-m <file>` |Migration properties. link:migration.properties[] documents every property with its default.
+|`--stream <name>`, `-S` |Create the workspaces from this stream and load the target workspace (see above).
+|`-d <dir>` |The sandbox. Required with `--stream` for a new sandbox.
+|`-b <branch>` |The branch to commit to: the initial branch of a new repository, or the new branch with `-g`.
+|`-g <sandbox>` |Add this stream as a new branch to the repository of an earlier migration (see link:docs/streams-as-branches.md[]).
+|`-L` |List the tags and change sets that would be migrated, then stop.
+|`-t <seconds>` |Repository connection timeout (default 900).
+|`-U` |Update migration: skip a leading empty tag.
+|===
+
+=== Interrupting, resuming and updating
+
+Run the same command again to continue a migration or to bring the repository up to date with new deliveries, for example until the cut-over:
+
+* Change sets that already have a commit are recognized by their `EWM-ChangeSet` trailers.
+* A run that stopped between accepting a change set and committing it is detected; that change set is discarded and migrated again (`resume.discard.pending`).
+* A sandbox with uncommitted changes is refused.
+
+Every run writes a JSON report (`.git/rtc2git/report-<time>.json`) listing the migrated change sets, tags, warnings and, for a branch, its branch point.
+
+=== Checking the result
+
+link:docs/e2e-testing.md[] describes how the plugin was tested against an EWM 7.2 server:
+
+* comparing `git archive` with `scm load`;
+* checking one commit per change set;
+* killing a run and resuming it.
+
+== Several streams
+
+Migrate the main stream first, then each other stream into its own sandbox with `-g <first sandbox> -b <branch>`. All streams end up as branches of one repository. link:docs/streams-as-branches.md[] explains how the branch points are found and what happens to change sets that several streams share.
+
+== z/OS and DBB zBuilder
+
+For EWM z/OS projects (Enterprise Extensions), the migration carries over:
+
+* the language definition of every member;
+* the data set definition of every zFolder;
+* file-level build variable overrides and code pages.
+
+The `ewm2zbuilder` Python tool in link:ewm2zbuilder[] turns them, plus an export of the project area's system definitions, into a DBB zBuilder configuration:
+
+* a shared build configuration (`Languages.yaml`, one language task per compiler; CICS, Db2 and link-edit variants merged into one task);
+* a `dbb-app.yaml` in the application repository, with the `zOSsrc` folders renamed to `src`.
+
+[source,bash]
+----
+tools/export-sysdefs -t <buildtoolkit> -r <uri> -u <user> -p "<project area>" -o sysdefs.xml  # asks for the password
+scm migrate-inventory -r ewm -o inventory.json "<stream>"   # what the stream uses, before migrating
+tools/migrate-zos -r ewm -s "<stream>" -x sysdefs.xml -w work -t app-repo -c <zBuilder schema.json>
+----
+
+See link:docs/zos-migration.md[] for the flow and the mapping rules, and link:docs/ewm-zos-model.md[] for how EWM stores this metadata.
+
+== Limitations
+
+* EWM does not record merges, so the branches have no merge commits. A change set delivered to several streams becomes a commit on each branch, with the same `EWM-ChangeSet` trailer.
+* Work items are carried only as numbers and summaries in commit messages. Linking the commits back to EWM work items through the Git Server Toolkit is a separate step.
+* The z/OS output has been validated against the zBuilder schema, but not yet built with DBB.
+
+== Development
+
+* Java code: `rtc2git.cli.extension/src`. Tests: `src_test` (JUnit 4, run by `./mvnw verify`).
+* Python code: `ewm2zbuilder/`. Tests: `cd ewm2zbuilder && uv run --group dev pytest`.
+* *Eclipse:*
+** Import the repository as a Maven project and set `ewm-7.2.target` as the target platform (it reads `SCMTOOLS_HOME`).
+** `rtc2git.cli.extension/launch/rtc2git.launch` starts `scm help migrate-to-git` with all plug-ins of the target platform.
+** The formatter profile is `eclipse-rtccli-format-settings.xml`.
+* link:CLAUDE.md[] summarizes the architecture.
+
+The https://github.com/rtcTo/rtc2gitcli/wiki[wiki] describes the manual setup for RTC 4 to 6.
 
 == Contribute & Feedback
-Feel free to report and/or fix https://github.com/rtcTo/rtc2gitcli/issues[issues] or create new pull requests
+
+Feel free to report and/or fix https://github.com/{project-full-path}/issues[issues] or create pull requests.

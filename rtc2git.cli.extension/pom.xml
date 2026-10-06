@@ -2,15 +2,27 @@
 <project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
   xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
   <modelVersion>4.0.0</modelVersion>
-  <groupId>to.rtc</groupId>
-  <artifactId>cli.extension</artifactId>
-  <version>1.0.1</version>
+  <parent>
+    <groupId>to.rtc</groupId>
+    <artifactId>rtc2gitcli-parent</artifactId>
+    <version>2.0.0-SNAPSHOT</version>
+  </parent>
+  <!-- must match Bundle-SymbolicName in META-INF/MANIFEST.MF -->
+  <artifactId>to.rtc.cli.migrate</artifactId>
+  <packaging>eclipse-plugin</packaging>
+  <name>RTC/EWM to git migration extension</name>
+  <url>https://github.com/rtcTo/rtc2gitcli</url>
+
+  <properties>
+    <jgit.version>7.3.0.202506031305-r</jgit.version>
+  </properties>
+
   <dependencies>
+    <!-- embedded as inner jars (lib/, see Bundle-ClassPath); kept private to this bundle -->
     <dependency>
       <groupId>org.eclipse.jgit</groupId>
       <artifactId>org.eclipse.jgit</artifactId>
-      <version>4.3.1.201605051710-r</version>
-      <scope>runtime</scope>
+      <version>${jgit.version}</version>
     </dependency>
     <dependency>
       <groupId>junit</groupId>
@@ -18,48 +30,56 @@
       <version>4.13.2</version>
       <scope>test</scope>
     </dependency>
+    <dependency>
+      <!-- provided by the scm runtime; needed when tests load IBM CLI classes -->
+      <groupId>commons-logging</groupId>
+      <artifactId>commons-logging</artifactId>
+      <version>1.2</version>
+      <scope>test</scope>
+    </dependency>
   </dependencies>
-  <properties>
-    <maven.compiler.target>1.6</maven.compiler.target>
-    <maven.compiler.source>1.6</maven.compiler.source>
-  </properties>
+
   <build>
-    <outputDirectory>bin</outputDirectory>
-    <testOutputDirectory>bin_test</testOutputDirectory>
     <sourceDirectory>src</sourceDirectory>
     <testSourceDirectory>src_test</testSourceDirectory>
     <plugins>
       <plugin>
-        <artifactId>maven-eclipse-plugin</artifactId>
-        <version>2.10</version>
-        <configuration>
-          <pde>true</pde>
-        </configuration>
-      </plugin>
-      <plugin>
         <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-dependency-plugin</artifactId>
-        <version>2.1</version>
+        <version>3.8.1</version>
         <executions>
           <execution>
-            <id>copy-dependencies</id>
-            <phase>process-sources</phase>
+            <id>embed-runtime-libraries</id>
+            <phase>initialize</phase>
             <goals>
               <goal>copy-dependencies</goal>
             </goals>
             <configuration>
-              <outputDirectory>${basedir}/lib</outputDirectory>
-              <overWriteReleases>true</overWriteReleases>
-              <overWriteSnapshots>true</overWriteSnapshots>
-              <overWriteIfNewer>true</overWriteIfNewer>
+              <includeScope>runtime</includeScope>
+              <stripVersion>true</stripVersion>
+              <outputDirectory>${project.basedir}/lib</outputDirectory>
             </configuration>
+          </execution>
+        </executions>
+      </plugin>
+      <plugin>
+        <!-- plain JUnit tests outside OSGi; eclipse-plugin packaging does not bind them by default -->
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-surefire-plugin</artifactId>
+        <version>3.5.3</version>
+        <executions>
+          <execution>
+            <id>unit-tests</id>
+            <phase>test</phase>
+            <goals>
+              <goal>test</goal>
+            </goals>
           </execution>
         </executions>
       </plugin>
     </plugins>
   </build>
-  <url>https://github.com/rtcTo/rtc2gitcli</url>
-  <name>RTC to git migration extension</name>
+
   <organization>
     <name>rtc.to</name>
     <url>https://rtc.to</url>

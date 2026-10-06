@@ -15,6 +15,10 @@ final class RtcChangeSet implements ChangeSet {
 	private String creatorName;
 	private String emailAddress;
 	private String component;
+	private String componentUuid;
+	private String creatorUserId;
+	private int historyIndex = -1;
+	private long lastChangeDate;
 
 	RtcChangeSet(String changeSetUuid) {
 		uuid = changeSetUuid;
@@ -51,7 +55,52 @@ final class RtcChangeSet implements ChangeSet {
 		return this;
 	}
 
-	String getUuid() {
+	RtcChangeSet setComponentUuid(String componentUuid) {
+		this.componentUuid = componentUuid;
+		return this;
+	}
+
+	RtcChangeSet setCreatorUserId(String creatorUserId) {
+		this.creatorUserId = creatorUserId;
+		return this;
+	}
+
+	/**
+	 * Key that identifies the component: its UUID, or the name when the UUID is unknown.
+	 */
+	String getComponentKey() {
+		return componentUuid != null ? componentUuid : component;
+	}
+
+	/**
+	 * @param historyIndex
+	 *            position of the change set in its component's history (delivery order), oldest = 0
+	 */
+	RtcChangeSet setHistoryIndex(int historyIndex) {
+		this.historyIndex = historyIndex;
+		return this;
+	}
+
+	RtcChangeSet setLastChangeDate(long lastChangeDate) {
+		this.lastChangeDate = lastChangeDate;
+		return this;
+	}
+
+	@Override
+	public long getLastChangeDate() {
+		return lastChangeDate > 0 ? lastChangeDate : creationDate;
+	}
+
+	int getHistoryIndex() {
+		return historyIndex;
+	}
+
+	String getComponentUuid() {
+		return componentUuid;
+	}
+
+	@Override
+	public String getUuid() {
 		return uuid;
 	}
 
@@ -67,6 +116,11 @@ final class RtcChangeSet implements ChangeSet {
 	@Override
 	public String getCreatorName() {
 		return creatorName;
+	}
+
+	@Override
+	public String getCreatorUserId() {
+		return creatorUserId;
 	}
 
 	@Override
