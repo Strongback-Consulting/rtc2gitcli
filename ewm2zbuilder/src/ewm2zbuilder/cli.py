@@ -116,6 +116,7 @@ def layout_main(argv: list[str]) -> int:
     ap.add_argument("--language-map", type=Path,
                     help=f"{LANGUAGE_MAP} of the shared configuration: add dbb-app.yaml in a last commit")
     ap.add_argument("--path-prefix", default="**/")
+    ap.add_argument("--schema", type=Path, help="zBuilder JSON schema; dbb-app.yaml must validate")
     args = ap.parse_args(argv)
 
     renames = DEFAULT_RENAMES
@@ -131,6 +132,16 @@ def layout_main(argv: list[str]) -> int:
                            renames, args.path_prefix)
             for note in config.notes:
                 print(f"note: {note}", file=sys.stderr)
+            if args.schema:
+                import json
+
+                from jsonschema import Draft202012Validator
+
+                errors = list(Draft202012Validator(json.loads(args.schema.read_text())).iter_errors(config.document))
+                for error in errors:
+                    print(f"schema: {error.message[:200]}", file=sys.stderr)
+                if errors:
+                    return 1
             app_yaml = _dump(config.document).encode("utf-8")
     result = transform(args.mirror, args.target, args.branch, renames, app_yaml)
     print(f"{args.target}: {result.commits} commit(s), {len(result.tags)} tag(s)"

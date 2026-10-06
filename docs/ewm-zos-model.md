@@ -33,6 +33,9 @@ The keys are on `com.ibm.team.enterprise.common.common.IEnterprisePropertyConsta
 | `team.enterprise.build.var.<name>` | file | per-file build variable (prefix `USER_VARIABLE_PREFIX`); maps to `forFiles` variables in `dbb-app.yaml` |
 | `team.enterprise.build.changes.ignoreForDependencyBuild` | file | flag; report only |
 | `team.enterprise.build.alwaysload` | file | `true`: the build always loads the member (seen live on the two REXX members of the BIND/REXX zFolders, which have no language definition) |
+| `mvsCodePage` | file | the member's MVS code page, when it differs from the default (used for `zos-working-tree-encoding`) |
+
+These five, plus the language definition, are what the z/OS client reads as member metadata (`ZFilesystemRestClient.getMemberMetadata`). The Build System Toolkit's metadata tasks write them as ordinary versioned user properties: the `filemetadata`, `remotefilemetadata` and `globalfilemetadata` tasks call `IVersionable.setUserProperty` and commit a change set. Metadata assigned by rules ("global" metadata) is therefore in the history like any other property change, and the migration picks it up.
 | `teamz.user.maintained.properties` | file | list of user-maintained property names (`MetadataConstants.USER_ADDED_PROPERTIES`) |
 
 Other relevant constants:

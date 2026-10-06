@@ -62,7 +62,7 @@ uv run ewm2zbuilder layout <mirror> <target> [--language-map out/language-map.ya
 
 Neither the IBM zBuilder schema nor any client export is committed. Tests find them through `EWM2ZBUILDER_SCHEMA` and `EWM2ZBUILDER_EXPORT`, or in the git-ignored `ewm2zbuilder/schema/` and `ewm2zbuilder/local/` folders, and skip when they are absent. This repo is public: never commit client system definitions, data set names, or generated output.
 
-End-to-end testing against a live EWM server is described in `docs/e2e-testing.md`.
+End-to-end testing against a live EWM server is described in `docs/e2e-testing.md`. The z/OS flow (`tools/migrate-zos`: mirror → shared zBuilder configuration → application repository) is described in `docs/zos-migration.md`.
 
 ## Architecture
 
