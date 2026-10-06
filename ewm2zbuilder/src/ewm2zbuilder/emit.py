@@ -28,7 +28,7 @@ from dataclasses import dataclass, field
 
 import yaml
 
-from .variants import Family, condition_for, find_families, merge_sequences, program_key
+from .variants import FEATURE_DEFAULTS, Family, condition_for, find_families, merge_sequences, program_key
 from .model import (
     CALL_COMMAND,
     USAGE_TEMP,
@@ -365,7 +365,7 @@ class _Converter:
                 steps.append(self.place(step, combine_conditions(feature, ewm), used))
 
         base = sd.langdefs[fam.task]
-        flags = [{"name": f, "value": False} for f in fam.features]
+        flags = [{"name": f, "value": FEATURE_DEFAULTS[f]} for f in fam.features]
         return self.task(fam.task, base, [fam.task, *fam.members, base.language_code], steps, variables,
                          datasets, flags + selects)
 

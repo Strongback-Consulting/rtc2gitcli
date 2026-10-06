@@ -52,6 +52,7 @@ VARIANTS = f"""<?xml version="1.0"?>
   <ld:langdef languageCode="COB" name="Cobol DB2 CICS Compile and Link"
               translators="Db2 precompile,CICS translate,Compile CICS,Link"/>
   <ld:langdef languageCode="COB" name="Cobol Compile and Link - Fetch" translators="Compile batch,Link other"/>
+  <ld:langdef languageCode="COB" name="Cobol Compile" translators="Compile batch"/>
   <ld:langdef languageCode="COB" name="Copybook" translators=""/>
  </target>
 </project>
@@ -66,16 +67,19 @@ def sd(tmp_path):
 
 
 def test_family_key_ignores_feature_words():
-    assert family_key("Cobol DB2 CICS Compile and Link") == "cobol compile and link"
-    assert family_key("JKE COBOL compilation (CICS&DB2) and link-edit") == "jke cobol compilation and link edit"
+    assert family_key("Cobol DB2 CICS Compile and Link") == "cobol compile"
+    assert family_key("JKE COBOL compilation (CICS&DB2) and link-edit") == "jke cobol compilation"
     assert family_key("JKE COBOL compilation (no CICS)") == "jke cobol compilation"
-    assert family_key("HOGN Assembler BATCHPEM and CICSPEM and Link") == "hogn assembler batchpem and cicspem and link"
+    assert family_key("JKE COBOL compilation") == "jke cobol compilation"
+    assert family_key("HOGN Assembler BATCHPEM and CICSPEM and Link") == "hogn assembler batchpem and cicspem"
 
 
 def test_features_from_programs_and_names(sd):
-    assert features(sd, sd.langdefs["Cobol CICS Compile and Link"]) == {"IS_CICS": True, "IS_SQL": False}
-    assert features(sd, sd.langdefs["Cobol DB2 Compile and Link"]) == {"IS_CICS": False, "IS_SQL": True}
-    assert features(sd, sd.langdefs["Cobol Compile and Link"]) == {"IS_CICS": False, "IS_SQL": False}
+    assert features(sd, sd.langdefs["Cobol CICS Compile and Link"]) == \
+        {"IS_CICS": True, "IS_SQL": False, "doLinkEdit": True}
+    assert features(sd, sd.langdefs["Cobol DB2 Compile and Link"]) == \
+        {"IS_CICS": False, "IS_SQL": True, "doLinkEdit": True}
+    assert features(sd, sd.langdefs["Cobol Compile"]) == {"IS_CICS": False, "IS_SQL": False, "doLinkEdit": False}
 
 
 def test_four_variants_form_one_family(sd):
@@ -83,8 +87,9 @@ def test_four_variants_form_one_family(sd):
     assert len(families) == 1 and not notes
     fam = families[0]
     assert fam.task == "Cobol Compile and Link"
-    assert fam.features == ["IS_CICS", "IS_SQL"]
-    assert fam.members["Cobol DB2 CICS Compile and Link"] == {"IS_CICS": True, "IS_SQL": True}
+    assert fam.features == ["IS_CICS", "IS_SQL", "doLinkEdit"]
+    assert fam.members["Cobol DB2 CICS Compile and Link"] == {"IS_CICS": True, "IS_SQL": True, "doLinkEdit": True}
+    assert fam.members["Cobol Compile"] == {"IS_CICS": False, "IS_SQL": False, "doLinkEdit": False}
     assert "Cobol Compile and Link - Fetch" not in fam.members  # different name: its own task
 
 
@@ -92,9 +97,11 @@ def test_condition_for(sd):
     fam = find_families(sd)[0][0]
     combos = {fam.values(m) for m in fam.members}
     assert condition_for(combos, fam) is None
-    assert condition_for({(True, False), (True, True)}, fam) == "${IS_CICS}"
-    assert condition_for({(False, True)}, fam) == "${IS_CICS} != true && ${IS_SQL}"
-    assert condition_for({(True, False), (False, True), (True, True)}, fam) == "${IS_CICS} || ${IS_SQL}"
+    assert condition_for({(True, False, True), (True, True, True)}, fam) == "${IS_CICS}"
+    assert condition_for({(False, True, True)}, fam) == "${IS_CICS} != true && ${IS_SQL}"
+    assert condition_for({(True, False, True), (False, True, True), (True, True, True)}, fam) == \
+        "${IS_CICS} || ${IS_SQL}"
+    assert condition_for(combos - {(False, False, False)}, fam) == "${doLinkEdit}"
 
 
 def test_merge_sequences_keeps_each_order():
@@ -107,10 +114,11 @@ def test_merged_task(sd):
     task = yaml.safe_load(out.files["Cobol_Compile_and_Link.yaml"])["tasks"][0]
     assert task["language"] == "Cobol Compile and Link"
     assert {"name": "IS_CICS", "value": False} in task["variables"]
+    assert {"name": "doLinkEdit", "value": True} in task["variables"]
     steps = {s["step"]: s for s in task["steps"]}
     assert steps["Db2 precompile"]["condition"] == "${IS_SQL}"
     assert steps["CICS translate"]["condition"] == "${IS_CICS}"
-    assert "condition" not in steps["Link"]
+    assert steps["Link"]["condition"] == "${doLinkEdit}"  # compile-only variant skips the binder
     # one compile step: options chosen per variant, CICS library only for CICS variants
     compile_step = steps["Compile batch"]
     assert compile_step["parm"] == "${COMPILE_BATCH_PARMS}"
@@ -129,7 +137,7 @@ def test_language_map(sd):
     out = emit_all(sd)
     entry = out.language_map["Cobol DB2 CICS Compile and Link"]
     assert entry["task"] == "Cobol Compile and Link"
-    assert entry["variables"] == {"IS_CICS": True, "IS_SQL": True}
+    assert entry["variables"] == {"IS_CICS": True, "IS_SQL": True, "doLinkEdit": True}
     assert {"IS_CICS", "BATOPTS", "CICSOPTS", "COMPILE_BATCH_PARMS"} <= set(entry["taskVariables"])
     assert out.language_map["Cobol Compile and Link - Fetch"]["variables"] == {}
     assert out.language_map["Copybook"]["task"] == "Copybook"
@@ -150,7 +158,7 @@ def test_same_features_are_not_merged(tmp_path):
         'name="Cobol CICS Compile and Link (copy)"', 'name="Cobol Compile and CICS Link"'))
     families, notes = find_families(parse(p))
     assert "Cobol CICS Compile and Link" not in families[0].members
-    assert any("same CICS/SQL features" in n for n in notes)
+    assert any("same CICS/SQL/link-edit features" in n for n in notes)
 
 
 ROOT = Path(__file__).parent.parent

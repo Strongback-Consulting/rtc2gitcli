@@ -1,19 +1,20 @@
 """Language definitions that are variants of one compiler.
 
 EWM systems often keep one language definition per runtime combination of the
-same compiler: COBOL batch, COBOL CICS, COBOL DB2 and COBOL CICS+DB2. zBuilder
-expresses that with one language task whose steps and options depend on
-boolean variables (`IS_CICS`, `IS_SQL`) that the application configuration
+same compiler: COBOL batch, COBOL CICS, COBOL DB2 and COBOL CICS+DB2, each with
+and without link-edit. zBuilder expresses that with one language task whose
+steps and options depend on boolean variables (`IS_CICS`, `IS_SQL`,
+`doLinkEdit`, as in IBM's zBuilder samples) that the application configuration
 sets per file. This module finds such families; `emit` merges each into one
 task and `language-map.yaml` tells `ewm2zbuilder app` which task and variables
 belong to each language definition.
 
 A family is a set of language definitions that
   * have the same language code,
-  * have the same name once CICS/DB2/SQL words are removed
-    ("Cobol DB2 CICS Compile and Link" -> "cobol compile and link"),
+  * have the same name once CICS/DB2/SQL and link-edit words are removed
+    ("Cobol DB2 CICS Compile and Link" -> "cobol compile"),
   * run the same compiler, and
-  * differ in their CICS/SQL features, one definition per combination.
+  * differ in their CICS/SQL/link-edit features, one definition per combination.
 Anything else stays a task of its own (and gets per-file overrides in the
 application configuration). The conversion report lists every family and
 every near miss, so the grouping can be reviewed.
@@ -27,17 +28,22 @@ from itertools import combinations
 
 from .model import CALL_COMMAND, LangDef, SystemDefinition
 
-FEATURES = ("IS_CICS", "IS_SQL")
+FEATURES = ("IS_CICS", "IS_SQL", "doLinkEdit")
+# Value of each variable in the merged task; dbb-app.yaml sets the other value per file.
+FEATURE_DEFAULTS = {"IS_CICS": False, "IS_SQL": False, "doLinkEdit": True}
 
 # Translator programs that imply a feature.
 _FEATURE_PROGRAMS = {
     "IS_CICS": re.compile(r"^DFH\w*P1\$$"),  # CICS command translators: DFHECP1$, DFHEAP1$, DFHEPP1$
     "IS_SQL": re.compile(r"^DSNH"),  # Db2 precompilers: DSNHPC, DSNHPSM
+    "doLinkEdit": re.compile(r"^(IEWL|IEWBLINK|IEWBLNK|HEWL|HEWLH096|HEWLKED)$"),  # the binder
 }
 # Compiler options that imply a feature (integrated CICS translator / Db2 coprocessor).
-_FEATURE_OPTIONS = {"IS_CICS": re.compile(r"\bCICS\b"), "IS_SQL": re.compile(r"\bSQL\b")}
+_FEATURE_OPTIONS = {"IS_CICS": re.compile(r"\bCICS\b"), "IS_SQL": re.compile(r"\bSQL\b"),
+                    "doLinkEdit": re.compile(r"(?!)")}  # no compiler option links
 # Words in language definition names.
-_FEATURE_WORDS = {"IS_CICS": r"cics", "IS_SQL": r"db2|sql"}
+_FEATURE_WORDS = {"IS_CICS": r"cics", "IS_SQL": r"db2|sql",
+                  "doLinkEdit": r"(?:and[\s_-]*)?(?:link[\s_-]*edit|link|lked)"}
 _NEGATION = r"(?:no|non|without)[\s_-]*"
 
 # Compiler programs by EWM language code; a family must share one of them.
@@ -129,7 +135,7 @@ def find_families(sd: SystemDefinition) -> tuple[list[Family], list[str]]:
         members = []
         for combo, names in by_combo.items():
             if len(names) > 1:
-                notes.append(f"'{key}' ({code}): {sorted(names)} have the same CICS/SQL features "
+                notes.append(f"'{key}' ({code}): {sorted(names)} have the same CICS/SQL/link-edit features "
                              f"{dict(zip(FEATURES, combo))}; kept as separate tasks")
             else:
                 members.append(names[0])
@@ -142,7 +148,8 @@ def find_families(sd: SystemDefinition) -> tuple[list[Family], list[str]]:
             notes.append(f"'{key}' ({code}): {sorted(members)} do not run the same compiler; not merged")
             continue
         varying = [f for f in FEATURES if len({feats[m][f] for m in members}) > 1]
-        task = min(members, key=lambda m: (sum(feats[m].values()), len(m), m))
+        # the task is named after the plainest variant: batch, linked
+        task = min(members, key=lambda m: (sum(feats[m][f] != FEATURE_DEFAULTS[f] for f in FEATURES), len(m), m))
         families.append(Family(task, code, varying, {m: {f: feats[m][f] for f in varying} for m in members}))
     return families, notes
 

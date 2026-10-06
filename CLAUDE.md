@@ -46,8 +46,8 @@ uv run ewm2zbuilder app <repo>/.ewm/zos-metadata.json --language-map out/languag
 uv run ewm2zbuilder layout <mirror> <target> [--language-map out/language-map.yaml]
 ```
 
-- **Shared configuration.** The conversion writes `Languages.yaml` plus one language-task YAML per language definition. Exception: `variants.py` merges language definitions that are CICS/DB2 variants of one compiler into one task (same language code, same name without CICS/DB2/SQL words, same compiler, one definition per feature combination).
-  - Steps not every variant runs get `${IS_CICS}`/`${IS_SQL}` conditions.
+- **Shared configuration.** The conversion writes `Languages.yaml` plus one language-task YAML per language definition. Exception: `variants.py` merges language definitions that are CICS/DB2/link-edit variants of one compiler into one task (same language code, same name without CICS/DB2/SQL/link words, same compiler, one definition per feature combination).
+  - Steps not every variant runs get `${IS_CICS}`/`${IS_SQL}`/`${doLinkEdit}` conditions (defaults false, false, true; `dbb-app.yaml` sets the other value per file).
   - Steps running the same program become one step: options come from a `select` variable, and DDs only some variants have get conditions.
   - Near misses are listed in `conversion-report.txt`.
 - **`language-map.yaml`** (not a zBuilder file) maps every language definition to its task, variant variables and task variables. It is the contract with `app`.

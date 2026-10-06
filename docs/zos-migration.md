@@ -30,10 +30,10 @@ The shared configuration (step 2) goes to a separate build configuration reposit
 
 ## How language definitions become zBuilder tasks
 
-- **Variants of one compiler share a task.** Language definitions that differ only in CICS and/or Db2 (for example COBOL batch, COBOL CICS, COBOL DB2, COBOL CICS+DB2) become one task. `IS_CICS` and `IS_SQL` select the variant:
+- **Variants of one compiler share a task.** Language definitions that differ only in CICS, Db2 and/or link-edit become one task (for example COBOL batch, COBOL CICS, COBOL DB2 and COBOL CICS+DB2, each compile-only or with link-edit). `IS_CICS`, `IS_SQL` and `doLinkEdit` select the variant; in the task they default to false, false and true:
   - steps only some variants run are conditioned on them;
   - a step all variants run with different options or DDs is one step, with a `select` variable for the options and conditions on the extra DDs.
-- **Members get the right variant per file.** `dbb-app.yaml` sets `IS_CICS`/`IS_SQL` per member (`forFiles`).
+- **Members get the right variant per file.** `dbb-app.yaml` sets `IS_CICS`/`IS_SQL`/`doLinkEdit` for the members whose value differs from the task default (`forFiles`).
 - **Members of a different compiler are overridden per file.** If a zFolder's members all belong to one task, `dbb-app.yaml` lists the folder. If a member's language definition maps to another task, the folder's members are listed one by one under their tasks.
 - **File-level variable overrides** become task variables with `forFiles` in `dbb-app.yaml`.
 - **Review the grouping.** `conversion-report.txt` lists every family and every near miss (same features, different compiler). `--no-variants` turns the grouping off.

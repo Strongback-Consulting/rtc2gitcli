@@ -11,7 +11,8 @@ Output: one language task entry per zBuilder task the application uses, with
   * `sources`: a zFolder glob when every member of the folder belongs to the
     task, otherwise the member paths (a member whose language definition maps to
     another task than its neighbours is thereby overridden per file),
-  * variant variables (`IS_CICS`, `IS_SQL`) for the members that need them, and
+  * variant variables (`IS_CICS`, `IS_SQL`, `doLinkEdit`) for the members whose
+    value differs from the task's default, and
   * the members' file-level build variable overrides,
 both as `forFiles` variables.
 """
@@ -21,6 +22,8 @@ from __future__ import annotations
 import posixpath
 from collections import defaultdict
 from dataclasses import dataclass, field
+
+from .variants import FEATURE_DEFAULTS
 
 DEFAULT_RENAMES = (("zOSsrc", "src"),)
 
@@ -81,12 +84,13 @@ def build(metadata: dict, language_map: dict, version: str, renames=DEFAULT_RENA
         files = sorted(p for p, t in task_of.items() if t == task)
         entry: dict = {"language": task, "sources": patterns(files, task)}
         variables = []
-        # variant variables: the task's default is false, so only the members that need true
+        # variant variables: only the members whose value differs from the task's default
         names = sorted({n for p in files for n in variant_of[p]})
         for name in names:
-            on = [p for p in files if variant_of[p].get(name)]
-            if on:
-                variables.append({"name": name, "value": True, "forFiles": patterns(on, task)})
+            default = FEATURE_DEFAULTS.get(name, False)
+            other = [p for p in files if name in variant_of[p] and variant_of[p][name] != default]
+            if other:
+                variables.append({"name": name, "value": not default, "forFiles": patterns(other, task)})
         # file-level overrides of translator variables, one entry per variable and value
         overrides: dict[tuple[str, str], list[str]] = defaultdict(list)
         for p in files:

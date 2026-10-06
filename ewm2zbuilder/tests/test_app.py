@@ -31,6 +31,7 @@ METADATA = {
         "App/zOSsrc/REXX/BIND.rex": {"languageDefinition": None, "alwaysLoad": True},
         "Other/zOSsrc/COBOL/X.cbl": member("COBOL (CICS) and link-edit"),
         "Other/zOSsrc/COBOL/Y.cbl": member("COBOL and link-edit"),
+        "Other/zOSsrc/COBOL/Z.cbl": member("COBOL compile only"),
     },
 }
 LANGUAGE_MAP = {
@@ -41,6 +42,9 @@ LANGUAGE_MAP = {
     "COBOL (CICS&DB2) and link-edit": {"task": "COBOL and link-edit",
                                        "variables": {"IS_CICS": True, "IS_SQL": True},
                                        "taskVariables": ["IS_CICS", "IS_SQL", "CICSOPTS"]},
+    "COBOL compile only": {"task": "COBOL and link-edit",
+                           "variables": {"IS_CICS": False, "IS_SQL": False, "doLinkEdit": False},
+                           "taskVariables": ["IS_CICS", "IS_SQL", "CICSOPTS"]},
     "COBOL compilation (no CICS)": {"task": "COBOL compilation (no CICS)", "variables": {}, "taskVariables": []},
     "Copybook": {"task": "Copybook", "variables": {}, "taskVariables": []},
 }
@@ -70,6 +74,13 @@ def test_variant_variables_per_file():
     assert variables["IS_CICS"] == {"name": "IS_CICS", "value": True, "forFiles": [
         "**/App/src/COBOL/CICS.cbl", "**/App/src/COBOL/CICSDB2.cbl", "**/Other/src/COBOL/X.cbl"]}
     assert variables["IS_SQL"]["forFiles"] == ["**/App/src/COBOL/CICSDB2.cbl"]
+
+
+def test_compile_only_member_turns_link_edit_off():
+    variables = tasks(build(METADATA, LANGUAGE_MAP, "1.0.3"))["COBOL and link-edit"]["variables"]
+    assert {"name": "doLinkEdit", "value": False, "forFiles": ["**/Other/src/COBOL/Z.cbl"]} in variables
+    # linked members keep the task's default: no entry for them
+    assert not any(v["name"] == "doLinkEdit" and v["value"] is True for v in variables)
 
 
 def test_file_level_build_variables():
