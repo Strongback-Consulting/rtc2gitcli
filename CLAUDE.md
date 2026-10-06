@@ -43,6 +43,7 @@ uv run --group dev pytest -q                                   # all tests
 uv run --group dev pytest -q tests/test_convert.py::test_emit_step_shape
 uv run ewm2zbuilder <export.xml> -o out --schema <schema.json> [--sources-map map.yaml] [--no-variants]
 uv run ewm2zbuilder app <repo>/.ewm/zos-metadata.json --language-map out/language-map.yaml -o <repo>/dbb-app.yaml --schema <schema.json>
+uv run ewm2zbuilder layout <mirror> <target> [--language-map out/language-map.yaml]
 ```
 
 - **Shared configuration.** The conversion writes `Languages.yaml` plus one language-task YAML per language definition. Exception: `variants.py` merges language definitions that are CICS/DB2 variants of one compiler into one task (same language code, same name without CICS/DB2/SQL words, same compiler, one definition per feature combination).
@@ -54,6 +55,10 @@ uv run ewm2zbuilder app <repo>/.ewm/zos-metadata.json --language-map out/languag
   - `sources` use folder globs where a zFolder's members all belong to one task, and member paths otherwise (a per-file override).
   - Variant variables and EWM file-level build variables become `forFiles` variables.
   - Paths use the target layout (`zOSsrc` → `src`, `--rename`).
+- **`layout`** (`layout.py`) builds the deliverable repository from the migration mirror.
+  - The mirror (the `scm` sandbox) keeps the EWM layout: resume, the dirty-sandbox check and the byte-for-byte check against `scm load` depend on it. Never rename paths inside `GitMigrator`.
+  - `layout` rewrites every commit with the folder renames, including the paths inside `.gitattributes`, `.gitignore` and `.ewm/zos-metadata.json`. It keeps authors, dates, messages and annotated tags, and can add `dbb-app.yaml` in a last commit.
+  - The rewrite is deterministic: without renames it reproduces the mirror's commit IDs exactly.
 
 Neither the IBM zBuilder schema nor any client export is committed. Tests find them through `EWM2ZBUILDER_SCHEMA` and `EWM2ZBUILDER_EXPORT`, or in the git-ignored `ewm2zbuilder/schema/` and `ewm2zbuilder/local/` folders, and skip when they are absent. This repo is public: never commit client system definitions, data set names, or generated output.
 

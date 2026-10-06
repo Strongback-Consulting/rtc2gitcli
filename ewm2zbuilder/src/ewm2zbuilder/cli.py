@@ -2,6 +2,7 @@
 
   ewm2zbuilder EXPORT.xml -o OUTDIR        system definitions -> shared zBuilder configuration
   ewm2zbuilder app METADATA --language-map OUTDIR/language-map.yaml -o dbb-app.yaml
+  ewm2zbuilder layout MIRROR TARGET [--language-map OUTDIR/language-map.yaml]
 """
 
 from __future__ import annotations
@@ -99,10 +100,50 @@ def app_main(argv: list[str]) -> int:
     return 1 if errors else 0
 
 
+def layout_main(argv: list[str]) -> int:
+    """ewm2zbuilder layout MIRROR TARGET [--language-map MAP]"""
+    from .app import DEFAULT_RENAMES, build
+    from .emit import SCHEMA_VERSION, _dump
+    from .layout import metadata_at, transform
+
+    ap = argparse.ArgumentParser(prog="ewm2zbuilder layout",
+                                 description="copy the migration mirror into a repository in the target layout")
+    ap.add_argument("mirror", type=Path, help="repository written by scm migrate-to-git (the sandbox)")
+    ap.add_argument("target", type=Path, help="new repository (must not exist or be empty)")
+    ap.add_argument("--branch", default="main")
+    ap.add_argument("--rename", action="append", metavar="OLD=NEW",
+                    help="folder rename (default zOSsrc=src); 'none' for no renames")
+    ap.add_argument("--language-map", type=Path,
+                    help=f"{LANGUAGE_MAP} of the shared configuration: add dbb-app.yaml in a last commit")
+    ap.add_argument("--path-prefix", default="**/")
+    args = ap.parse_args(argv)
+
+    renames = DEFAULT_RENAMES
+    if args.rename:
+        renames = () if args.rename == ["none"] else tuple(tuple(r.split("=", 1)) for r in args.rename)
+    app_yaml = None
+    if args.language_map:
+        metadata = metadata_at(args.mirror)
+        if metadata is None:
+            print("no .ewm/zos-metadata.json in the mirror: no dbb-app.yaml", file=sys.stderr)
+        else:
+            config = build(metadata, yaml.safe_load(args.language_map.read_text()) or {}, SCHEMA_VERSION,
+                           renames, args.path_prefix)
+            for note in config.notes:
+                print(f"note: {note}", file=sys.stderr)
+            app_yaml = _dump(config.document).encode("utf-8")
+    result = transform(args.mirror, args.target, args.branch, renames, app_yaml)
+    print(f"{args.target}: {result.commits} commit(s), {len(result.tags)} tag(s)"
+          f"{', plus dbb-app.yaml' if app_yaml else ''}; {args.branch} at {result.head[:12]}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     if argv[:1] == ["app"]:
         return app_main(argv[1:])
+    if argv[:1] == ["layout"]:
+        return layout_main(argv[1:])
     ap = argparse.ArgumentParser(prog="ewm2zbuilder", description=__doc__)
     ap.add_argument("export", type=Path, help="EWM system definition export (XML)")
     ap.add_argument("-o", "--out", type=Path, default=Path("zbuilder-out"))
