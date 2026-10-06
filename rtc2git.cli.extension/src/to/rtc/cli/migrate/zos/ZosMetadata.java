@@ -14,7 +14,7 @@ import to.rtc.cli.migrate.FileProperties;
 /**
  * The z/OS metadata of one state of the sandbox, as written to <code>.ewm/zos-metadata.json</code> in every commit
  * where it changes: the data set definition of each zFolder and, for each member, its language definition, per-file
- * build variables, code page and build flags. This file is the hand-off to <code>ewm2zbuilder --app-yaml</code>.
+ * build variables, code page and build flags. This file is the hand-off to <code>ewm2zbuilder app</code> and <code>layout</code> (dbb-app.yaml).
  */
 public final class ZosMetadata {
 	public static final String PATH = ".ewm/zos-metadata.json";

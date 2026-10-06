@@ -4,13 +4,16 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-`rtc2gitcli` migrates history from an IBM RTC (Rational Team Concert / Jazz SCM) workspace into a Git repository. It is **not a standalone app**: it is an Eclipse/OSGi plugin that adds a `migrate-to-git` subcommand to IBM's `scm` CLI (registered in `rtc2git.cli.extension/plugin.xml` via the `com.ibm.team.rtc.cli.infrastructure.subcommand` extension point).
+`rtc2gitcli` migrates history from IBM EWM 7.2 (formerly RTC, Jazz SCM) streams into a Git repository. It is **not a standalone app**: it is an Eclipse/OSGi plugin that adds a `migrate-to-git` subcommand to IBM's `scm` CLI (registered in `rtc2git.cli.extension/plugin.xml` via the `com.ibm.team.rtc.cli.infrastructure.subcommand` extension point).
 
-Usage (from README.adoc), run inside the sandbox directory after `scm load ... <TARGET_WORKSPACE>`:
+Typical usage (README.adoc has the details): log in once with `scm login ... -n <nick> -c`, then run
 
 ```bash
-scm migrate-to-git -r <uri> -u <username> -P <password> -m <migration.properties> <SOURCE_WORKSPACE> <TARGET_WORKSPACE>
+mkdir -p <sandbox>/.jazz5
+scm migrate-to-git -r <nick> -m <migration.properties> --stream "<stream>" -b main -d <sandbox> <SOURCE_WS> <TARGET_WS>
 ```
+
+Without `--stream`, the two workspaces are set up by hand and the target workspace must already be loaded in the sandbox.
 
 `migration.properties` at the repo root is the documented template of every supported migration option (git user defaults, encoding, baseline include regex, work item / commit message formatting, `.gitattributes`/`.gitignore` entries, JGit tuning, etc.). When adding a new property, document it there and read it in `GitMigrator`.
 
@@ -30,7 +33,7 @@ export SCMTOOLS_HOME=<dest>/scmtools                  # folder containing eclips
 - JGit and its dependencies are embedded as private inner jars. The `initialize` phase copies runtime deps, version-stripped, into `lib/`. `META-INF/MANIFEST.MF` `Bundle-ClassPath` and `build.properties` `bin.includes` must list the same `lib/*.jar` names; update all three when a dependency changes.
 - Tests are JUnit 4, run by `maven-surefire-plugin` outside OSGi. Tests that load IBM CLI classes need the SCM Tools target platform, so every test run needs `SCMTOOLS_HOME`.
 - Install into an SCM Tools copy with `tools/install-scmtools-plugin.sh <scmtools-dir>`. EWM 7.x starts bundles through `simpleconfigurator`, so the script registers the jar in `bundles.info`; `dropins/` is ignored. Check the install with `scm help migrate-to-git`. On Apple silicon without Rosetta, the bundled x86_64 JRE won't start. Run the launcher jar from `eclipse/scm` with a local Java 17+ instead.
-- Eclipse workflow: import as a Maven project with `ewm-7.2.target` as the active target platform, and run `launch/rtc2git.launch`. Its plugin list is stale (RTC 4.x era) and needs regenerating in Eclipse.
+- Eclipse workflow: import as a Maven project with `ewm-7.2.target` as the active target platform, and run `launch/rtc2git.launch`. It launches all plug-ins of the target platform (`default=true`), so it needs no plug-in list.
 - Formatting: Eclipse formatter profile `eclipse-rtccli-format-settings.xml` (tabs for indentation).
 
 ### ewm2zbuilder (Python)
@@ -81,19 +84,19 @@ Flow of one `scm migrate-to-git` run:
    - The root `.gitignore` holds the migration's own entries (`/.jazz5`, `/.metadata`, configured exclusions). A root `.jazzignore` only owns a marked block inside it; `.gitignore` files in subfolders are fully owned by their `.jazzignore`.
    - Ignored-but-present files are force-added (`ForceAddTreeIterator`), except scm metadata and configured exclusions, because only scm writes to the sandbox. It also applies JGit window-cache tuning and runs `git gc` every 1000 commits (`needsIntermediateCleanup`/`intermediateCleanup`).
 
-Phase 2 additions:
+EWM data beyond file content:
 - **File properties.** `ChangeSetDetails` / `ewm/EwmChangeSetDetails` (Java API) read the EWM properties of the touched items after every accept, into a `FilePropertiesModel` keyed by item ID. `GitMigrator.updateFileProperties` then writes a generated `.gitattributes` block (`GitattributesGenerator`), executable modes, and index-only `.gitkeep` entries (`keep.empty.folders`). This is what makes git byte-identical to `scm load`.
 - **Resume.** The initial commit stores `EWM-Base` trailers. `ResumeAnalysis` compares them, plus the `EWM-ChangeSet` trailers, with the target workspace history before the incoming change sets are computed, and discards accepted-but-uncommitted change sets.
 - **Snapshots.** These become `snapshot/<name>` tags (`SnapshotTag`, `SnapshotPlacer`); `EWM-Snapshot` and `EWM-Baseline` lines in the tag message identify them on reruns.
 - **Workspace setup.** `--stream` creates both workspaces (`ewm/WorkspaceProvisioner`) and loads the target when none of its components is in the sandbox. scm fixes the sandbox root when the command starts (`initpolicy`), so a new sandbox needs `-d`; otherwise the in-process load registers it with a second daemon and fails. With `-d`, the `uri/argument/ancestor` policy only accepts a directory that already is a sandbox, which an empty `.jazz5` folder satisfies (`tools/migrate-zos` creates it).
 - **Report.** `MigrationReport` writes `<git dir>/rtc2git/report-<time>.json` on every run that has a repository.
 
-Streams as branches (Phase 5, `docs/streams-as-branches.md`):
+Streams as branches and large files (`docs/streams-as-branches.md`):
 - **Branches.** One run per stream. `-b` names the branch. With `-g <earlier sandbox>`, a new sandbox becomes a linked worktree of that repository; `GitMigrator.startBranch` writes the worktree files itself, and JGit 7.3 handles linked worktrees. `.git` can therefore be a file: use `MigrationReport.gitDirectory`, never `new File(sandbox, ".git")` as a directory.
 - **Git LFS** (`lfs.threshold`, `lfs.patterns`). `LfsCleanFilter` is registered as JGit's builtin `lfs` clean filter (`filter.lfs.useJGitBuiltin`). It writes pointers to git and content to `<common git dir>/lfs/objects`, which is where git-lfs looks. `.gitattributes` gets a second generated block after the EWM block. `ewm2zbuilder layout` copies the object store.
 - **Branch point.** `BranchPoint` (pure, unit-tested) walks every branch's first-parent chain and matches each `EWM-ChangeSet` against the stream's per-component delivery order. `WorkspaceProvisioner.acceptConfiguration` accepts the matched prefix into the not-yet-loaded target workspace. The existing resume checks then verify the sandbox against the commit.
 
-z/OS (`zos/`, Phase 3 onward; the EE data model is in `docs/ewm-zos-model.md`):
+z/OS (`zos/`; the EE data model is in `docs/ewm-zos-model.md`):
 - **Properties.** Members and zFolders reference their language and data set definitions by UUID in user properties (`ZosProperties`), which `FileProperties` already carries.
 - **Resolving names.** `SystemDefinitions.create` returns `EeSystemDefinitions`, the only class that touches EE types, or an "unavailable" resolver when the optional EE imports are not wired (plain SCM Tools). Keep EE types out of every other class so that non-z/OS migrations run without EE.
 - **Inventory.** `scm migrate-inventory` (`ZosInventoryCmd`, a second subcommand in `plugin.xml`) is a read-only inventory of a stream; `ZosInventory` builds it and is unit-tested without a server.

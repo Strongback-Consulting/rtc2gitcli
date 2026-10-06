@@ -70,7 +70,7 @@ Package `com.ibm.team.enterprise.systemdefinition.common.model` provides:
 
 **Versioning caveat.** A property stores only the item UUID, not a state. Resolution therefore returns the definition's *current* name, even for historical commits. `computeHistory()` and `getModifiedDateByStateId()` exist if historical names are ever needed. The migration records both the UUID and the resolved name in `.ewm/zos-metadata.json`.
 
-## Live findings that shape Phase 4
+## Live findings that shape the z/OS migration
 
 From `scm migrate-inventory -r <repo> -o inventory.json "Mortgage Development Stream"`:
 
@@ -81,7 +81,7 @@ From `scm migrate-inventory -r <repo> -o inventory.json "Mortgage Development St
   - Language codes seen: `COB`, `ASM` (BMS), `OTH` (link-edit).
 - **Mixed zFolders.** One zFolder mixes langdefs: `MortgageApplication-JKECMORT/zOSsrc/COBOL` holds three COBOL members with three different langdefs (CICS, CICS&DB2, no CICS). Folder globs alone are not enough; per-file assignments are needed (`forFiles` or explicit paths).
 - **Members without a language definition** exist on purpose: BIND and REXX members (`alwaysload`). They are not compiled, so they need no task.
-- **Streams.** Development and Production have the same assignments. A langdef change in history did not occur in this sample, so the Phase 4 history test needs a prepared change (on the server, with the user's OK).
+- **Streams.** Development and Production have the same assignments. A langdef change in history did not occur in this sample, so a live test of a reassignment needs a change prepared on the server.
 - **Not observed, handled defensively.** Archived or deleted definitions (reported as unresolved, by UUID), binary members, and build variables.
 - **Not examined.** SCD `IFileSourceCodeData.language`. The language definition is what the EWM build uses, so it stays the source for zBuilder.
 
