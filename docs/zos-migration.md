@@ -12,6 +12,11 @@ tools/migrate-zos -r <nick> -s "<stream>" -x <sysdef-export.xml> -w <work> -t <a
 | 2. Shared build configuration | `ewm2zbuilder <export.xml> -o <work>/zbuilder` | `Languages.yaml`, one language task YAML per task, `language-map.yaml`, `conversion-report.txt` |
 | 3. Application repository | `ewm2zbuilder layout <work>/mirror <app-repo> --language-map …` | the history in the target layout, plus `dbb-app.yaml` |
 
+The system definition export comes from the Build System Toolkit:
+- **Command:** `tools/export-sysdefs -t <toolkit jars> -r <repository URI> -u <user> -p "<project area>" -o export.xml`.
+- **Password:** the script asks for it and passes it to Ant through a private, temporary properties file.
+- **Project area:** `migrate-inventory` shows the project area that owns each definition.
+
 The shared configuration (step 2) goes to a separate build configuration repository, next to a hand-maintained `dbb-build.yaml`. The application repository (step 3) is the one developers clone.
 
 ## What carries the z/OS information

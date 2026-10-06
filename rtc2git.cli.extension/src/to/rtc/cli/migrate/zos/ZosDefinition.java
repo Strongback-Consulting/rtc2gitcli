@@ -21,6 +21,7 @@ public final class ZosDefinition {
 	private final String uuid;
 	private final String name;
 	private final String description;
+	private final String projectArea;
 	private final boolean archived;
 	private final String languageCode;
 	private final List<String> defaultPatterns;
@@ -38,6 +39,7 @@ public final class ZosDefinition {
 		this.uuid = builder.uuid;
 		this.name = builder.name;
 		this.description = builder.description;
+		this.projectArea = builder.projectArea;
 		this.archived = builder.archived;
 		this.languageCode = builder.languageCode;
 		this.defaultPatterns = Collections.unmodifiableList(new ArrayList<String>(builder.defaultPatterns));
@@ -111,6 +113,7 @@ public final class ZosDefinition {
 		map.put("uuid", uuid);
 		map.put("name", name);
 		map.put("description", description);
+		map.put("projectArea", projectArea);
 		map.put("archived", Boolean.valueOf(archived));
 		if (kind == Kind.LANGUAGE) {
 			map.put("languageCode", languageCode);
@@ -133,6 +136,7 @@ public final class ZosDefinition {
 		private final String uuid;
 		private final String name;
 		private String description;
+		private String projectArea;
 		private boolean archived;
 		private String languageCode;
 		private List<String> defaultPatterns = Collections.emptyList();
@@ -153,6 +157,15 @@ public final class ZosDefinition {
 
 		public Builder description(String value) {
 			description = value;
+			return this;
+		}
+
+		/**
+		 * @param value
+		 *            name of the project area that owns the definition (where to export it from)
+		 */
+		public Builder projectArea(String value) {
+			projectArea = value;
 			return this;
 		}
 

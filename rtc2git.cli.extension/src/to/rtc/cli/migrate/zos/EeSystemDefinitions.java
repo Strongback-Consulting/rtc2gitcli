@@ -18,6 +18,9 @@ import com.ibm.team.enterprise.systemdefinition.common.model.IStringHelper;
 import com.ibm.team.enterprise.systemdefinition.common.model.ISystemDefinition;
 import com.ibm.team.enterprise.systemdefinition.common.model.ISystemDefinitionHandle;
 import com.ibm.team.enterprise.systemdefinition.common.model.IZosLanguageDefinition;
+import com.ibm.team.process.common.IProjectArea;
+import com.ibm.team.process.common.IProjectAreaHandle;
+import com.ibm.team.repository.client.IItemManager;
 import com.ibm.team.repository.client.ITeamRepository;
 import com.ibm.team.repository.common.IItemType;
 import com.ibm.team.repository.common.TeamRepositoryException;
@@ -32,7 +35,11 @@ final class EeSystemDefinitions extends SystemDefinitions {
 	private final IProgressMonitor monitor = new NullProgressMonitor();
 	private final Map<String, ZosDefinition> cache = new HashMap<String, ZosDefinition>();
 
+	private final ITeamRepository repository;
+	private final Map<String, String> projectAreaNames = new HashMap<String, String>();
+
 	EeSystemDefinitions(ITeamRepository repository) {
+		this.repository = repository;
 		this.client = ClientFactory.getSystemDefinitionModelClient(repository);
 	}
 
@@ -90,13 +97,32 @@ final class EeSystemDefinitions extends SystemDefinitions {
 	private void store(List<ISystemDefinition> definitions) {
 		for (ISystemDefinition definition : definitions) {
 			if (definition != null) {
-				cache.put(definition.getItemId().getUuidValue(), toDefinition(definition));
+				cache.put(definition.getItemId().getUuidValue(),
+						toDefinition(definition, projectAreaName(definition.getProjectArea())));
 			}
 		}
 	}
 
+	private String projectAreaName(IProjectAreaHandle handle) {
+		if (handle == null) {
+			return null;
+		}
+		String uuid = handle.getItemId().getUuidValue();
+		if (!projectAreaNames.containsKey(uuid)) {
+			String name = null;
+			try {
+				name = ((IProjectArea) repository.itemManager().fetchCompleteItem(handle, IItemManager.DEFAULT,
+						monitor)).getName();
+			} catch (TeamRepositoryException e) {
+				// not readable for this user: leave the name out
+			}
+			projectAreaNames.put(uuid, name);
+		}
+		return projectAreaNames.get(uuid);
+	}
+
 	@SuppressWarnings("unchecked")
-	static ZosDefinition toDefinition(ISystemDefinition definition) {
+	static ZosDefinition toDefinition(ISystemDefinition definition, String projectArea) {
 		String uuid = definition.getItemId().getUuidValue();
 		ZosDefinition.Builder builder;
 		if (definition instanceof ILanguageDefinition) {
@@ -118,7 +144,8 @@ final class EeSystemDefinitions extends SystemDefinitions {
 						.record(dataSet.getRecordFormat(), dataSet.getRecordLength());
 			}
 		}
-		return builder.description(definition.getDescription()).archived(definition.isArchived())
+		return builder.description(definition.getDescription()).projectArea(projectArea)
+				.archived(definition.isArchived())
 				.properties(definition.getProperties()).build();
 	}
 }
