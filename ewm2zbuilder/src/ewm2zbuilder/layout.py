@@ -16,7 +16,9 @@ repository in the target layout:
     (default `main`), the branches of other streams (`migrate-to-git
     --git-repository`) under their own; history they share stays shared;
   * optionally a last commit on each branch adds `dbb-app.yaml` (see `app.py`),
-    built from the metadata of the branch's newest commit.
+    built from the metadata of the branch's newest commit;
+  * Git LFS content (`lfs.threshold`, `lfs.patterns` of the migration) is copied
+    into the target's LFS object store; the pointers in the history are unchanged.
 
 Uses the git command line; the mirror is not modified.
 """
@@ -25,6 +27,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import tempfile
 from dataclasses import dataclass, field
@@ -163,6 +166,7 @@ def transform(source: Path, target: Path, branch: str = "main", renames=DEFAULT_
     if branch not in tips:
         raise RuntimeError(f"the mirror's current branch {current} has no commits")
 
+    _copy_lfs_objects(source, target)
     rewriter = _Rewriter(source, target, renames)
     result = Result()
     for sha in git(target, "rev-list", "--reverse", "--topo-order", *sorted(set(tips.values()))).decode().split():
@@ -209,6 +213,22 @@ def transform(source: Path, target: Path, branch: str = "main", renames=DEFAULT_
     git(target, "gc", "--quiet", "--prune=now")
     result.head = result.branches[branch]
     return result
+
+
+def _copy_lfs_objects(source: Path, target: Path) -> None:
+    """The mirror's Git LFS objects (in the common git directory, shared by its worktrees) into the target."""
+    common = Path(git(source, "rev-parse", "--path-format=absolute", "--git-common-dir").decode().strip())
+    objects = common / "lfs" / "objects"
+    if not objects.is_dir():
+        return
+
+    def link_or_copy(src, dst):
+        try:
+            os.link(src, dst)
+        except OSError:
+            shutil.copy2(src, dst)
+
+    shutil.copytree(objects, target / ".git" / "lfs" / "objects", dirs_exist_ok=True, copy_function=link_or_copy)
 
 
 def _add_app_yaml(target: Path, commit: str, content: bytes, identity: tuple[str, str]) -> str:

@@ -129,3 +129,21 @@ def test_stream_branches_keep_shared_history(mirror, tmp_path):
     assert "IS_CICS" in run(target, "show", "main:dbb-app.yaml")
     assert "IS_CICS" not in run(target, "show", "release:dbb-app.yaml")
     assert run(target, "describe", "--tags", "release~1").startswith("Sprint_1")
+
+
+def test_lfs_objects_are_copied(mirror, tmp_path):
+    oid = "a" * 64
+    store = mirror / ".git" / "lfs" / "objects" / "aa" / "aa"
+    store.mkdir(parents=True)
+    (store / oid).write_bytes(b"large content")
+    pointer = f"version https://git-lfs.github.com/spec/v1\noid sha256:{oid}\nsize 13\n"
+    commit(mirror, {"App/zOSsrc/LOAD/BIG.bin": pointer,
+                    ".gitattributes": "/App/zOSsrc/LOAD/BIG.bin filter=lfs diff=lfs merge=lfs -text\n"},
+           "Large file\n\nEWM-ChangeSet: _cs3", "1700005000 +0000")
+
+    transform(mirror, tmp_path / "t")
+
+    target = tmp_path / "t"
+    assert (target / ".git" / "lfs" / "objects" / "aa" / "aa" / oid).read_bytes() == b"large content"
+    assert run(target, "show", "main:App/src/LOAD/BIG.bin") == pointer.strip()
+    assert run(target, "show", "main:.gitattributes") == "/App/src/LOAD/BIG.bin filter=lfs diff=lfs merge=lfs -text"

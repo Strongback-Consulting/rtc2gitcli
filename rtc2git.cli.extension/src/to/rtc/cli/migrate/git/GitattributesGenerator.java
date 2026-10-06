@@ -162,6 +162,22 @@ final class GitattributesGenerator {
 		return sb.toString();
 	}
 
+	/**
+	 * Reverses {@link #escape(String)}.
+	 */
+	static String unescape(String pattern) {
+		StringBuilder sb = new StringBuilder();
+		String text = pattern.replace("[[:space:]]", " ");
+		for (int i = 0; i < text.length(); i++) {
+			char c = text.charAt(i);
+			if (c == '\\' && i + 1 < text.length()) {
+				c = text.charAt(++i);
+			}
+			sb.append(c);
+		}
+		return sb.toString();
+	}
+
 	private static final class Node {
 		final Map<String, Node> dirs = new TreeMap<String, Node>();
 		final Map<String, String> files = new TreeMap<String, String>();

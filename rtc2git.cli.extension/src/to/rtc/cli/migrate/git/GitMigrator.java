@@ -125,6 +125,16 @@ public final class GitMigrator implements Migrator {
 	private File branchRepository;
 	// the commit a new branch started at, while the sandbox is checked against it
 	private String branchStart;
+	// Git LFS: files above this size (0: off) and these patterns (lfs.threshold, lfs.patterns)
+	private long lfsThreshold;
+	private final List<String> lfsPatterns = new ArrayList<String>();
+	// files that went to LFS because of their size; they stay there while they exist
+	private final Set<String> lfsPaths = new TreeSet<String>();
+	// the last block generated from the EWM file properties
+	private List<String> ewmAttributes = Collections.emptyList();
+	static final String LFS_BEGIN = "# >>> Git LFS (lfs.patterns, lfs.threshold)";
+	static final String LFS_END = "# <<< Git LFS";
+	static final String LFS_ATTRIBUTES = " filter=lfs diff=lfs merge=lfs -text";
 
 	public GitMigrator(Properties properties) {
 		ignoredFileExtensions = new HashSet<String>();
@@ -279,6 +289,10 @@ public final class GitMigrator implements Migrator {
 		try {
 			// add all untracked files
 			Status status = git.status().call();
+			if (lfsThreshold > 0 && updateLfsPaths(status)) {
+				writeAttributes();
+				pendingAdds.add(".gitattributes");
+			}
 
 			Set<String> toAdd = handleAdded(status);
 			Set<String> toForce = handleIgnoredButVersioned(status);
@@ -521,6 +535,10 @@ public final class GitMigrator implements Migrator {
 		config.setBoolean("core", null, "ignoreCase", false);
 		config.setString("core", null, "autocrlf", File.separatorChar == '/' ? "input" : "true");
 		config.setString("push", null, "default", "simple");
+		if (isLfs()) {
+			// JGit stores LFS content through LfsCleanFilter; git with git-lfs installed uses its own filter
+			config.setBoolean("filter", "lfs", "useJGitBuiltin", true);
+		}
 		fillConfigFromProperties(config);
 		config.save();
 	}
@@ -568,6 +586,12 @@ public final class GitMigrator implements Migrator {
 				Boolean.parseBoolean(props.getProperty("gitattributes.working-tree-encoding", "false")), zosCodePage);
 		intentionalIgnores = null;
 		parseElements(props.getProperty("ignore.file.extensions", ""), ignoredFileExtensions);
+		lfsThreshold = parseConfigValue(props.getProperty("lfs.threshold"), 0);
+		lfsPatterns.clear();
+		parseElements(props.getProperty("lfs.patterns", ""), lfsPatterns);
+		if (isLfs()) {
+			LfsCleanFilter.register();
+		}
 		// update window cache config
 		WindowCacheConfig cfg = getWindowCacheConfig();
 		cfg.setPackedGitOpenFiles(
@@ -633,6 +657,7 @@ public final class GitMigrator implements Migrator {
 							+ "], not on [" + branch + "]");
 				}
 				checkResumable();
+				readLfsPaths();
 			} else if (sandboxRootDirectory.exists()) {
 				git = Git.init().setDirectory(sandboxRootDirectory).setInitialBranch(branch).call();
 			} else {
@@ -776,27 +801,106 @@ public final class GitMigrator implements Migrator {
 				executablePaths.add(file.getPath());
 			}
 		}
-		List<String> generated = attributesGenerator.generate(files);
+		ewmAttributes = attributesGenerator.generate(files);
+		writeAttributes();
+	}
+
+	/**
+	 * Writes the root <code>.gitattributes</code>: the lines of the <code>gitattributes</code> property, the block
+	 * generated from the EWM file properties, then the Git LFS block (later lines win).
+	 */
+	private void writeAttributes() throws IOException {
 		File gitattributes = new File(rootDir, ".gitattributes");
 		List<String> existing = Files.readLines(gitattributes, getCharset());
 		List<String> lines = new ArrayList<String>();
-		boolean inBlock = false;
+		List<String> oldEwm = new ArrayList<String>();
+		String block = null;
 		for (String line : existing) {
-			if (line.equals(GitattributesGenerator.BEGIN)) {
-				inBlock = true;
-			} else if (line.equals(GitattributesGenerator.END)) {
-				inBlock = false;
-			} else if (!inBlock) {
+			if (line.equals(GitattributesGenerator.BEGIN) || line.equals(LFS_BEGIN)) {
+				block = line;
+			} else if (line.equals(GitattributesGenerator.END) || line.equals(LFS_END)) {
+				block = null;
+			} else if (block == null) {
 				lines.add(line);
+			} else if (block.equals(GitattributesGenerator.BEGIN)) {
+				oldEwm.add(line);
 			}
 		}
+		List<String> generated = attributesFromEwm ? ewmAttributes : oldEwm;
 		if (!generated.isEmpty()) {
 			lines.add(GitattributesGenerator.BEGIN);
 			lines.addAll(generated);
 			lines.add(GitattributesGenerator.END);
 		}
+		if (isLfs() && (!lfsPatterns.isEmpty() || !lfsPaths.isEmpty())) {
+			lines.add(LFS_BEGIN);
+			for (String pattern : lfsPatterns) {
+				lines.add(pattern + LFS_ATTRIBUTES);
+			}
+			for (String path : lfsPaths) {
+				lines.add("/" + GitattributesGenerator.escape(path) + LFS_ATTRIBUTES);
+			}
+			lines.add(LFS_END);
+		}
 		if (!lines.equals(existing)) {
 			Files.writeLines(gitattributes, lines, getCharset(), false);
+		}
+	}
+
+	private boolean isLfs() {
+		return lfsThreshold > 0 || !lfsPatterns.isEmpty();
+	}
+
+	/**
+	 * Files above <code>lfs.threshold</code> that are about to be committed go to LFS; files that no longer exist
+	 * leave the list.
+	 *
+	 * @return whether the list changed
+	 */
+	private boolean updateLfsPaths(Status status) {
+		boolean changed = false;
+		for (Iterator<String> it = lfsPaths.iterator(); it.hasNext();) {
+			if (!new File(rootDir, it.next()).isFile()) {
+				it.remove();
+				changed = true;
+			}
+		}
+		Set<String> candidates = new TreeSet<String>(status.getUntracked());
+		candidates.addAll(status.getModified());
+		if (forceAddIgnored) {
+			for (String ignored : status.getIgnoredNotInIndex()) {
+				if (!isIntentionallyIgnored(ignored)) {
+					candidates.add(ignored);
+				}
+			}
+		}
+		for (String path : candidates) {
+			File file = new File(rootDir, path);
+			if (!lfsPaths.contains(path) && file.isFile() && file.length() > lfsThreshold) {
+				lfsPaths.add(path);
+				changed = true;
+			}
+		}
+		return changed;
+	}
+
+	/**
+	 * On resume: the files that went to LFS because of their size, from the LFS block of <code>.gitattributes</code>.
+	 */
+	private void readLfsPaths() throws IOException {
+		lfsPaths.clear();
+		boolean inBlock = false;
+		for (String line : Files.readLines(new File(rootDir, ".gitattributes"), getCharset())) {
+			if (line.equals(LFS_BEGIN)) {
+				inBlock = true;
+			} else if (line.equals(LFS_END)) {
+				inBlock = false;
+			} else if (inBlock && line.endsWith(LFS_ATTRIBUTES)) {
+				String pattern = line.substring(0, line.length() - LFS_ATTRIBUTES.length());
+				if (!lfsPatterns.contains(pattern) && pattern.startsWith("/")) {
+					lfsPaths.add(GitattributesGenerator.unescape(pattern.substring(1)));
+				}
+			}
 		}
 	}
 

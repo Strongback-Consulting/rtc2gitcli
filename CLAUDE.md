@@ -90,6 +90,7 @@ Phase 2 additions:
 
 Streams as branches (Phase 5, `docs/streams-as-branches.md`):
 - **Branches.** One run per stream. `-b` names the branch. With `-g <earlier sandbox>`, a new sandbox becomes a linked worktree of that repository; `GitMigrator.startBranch` writes the worktree files itself, and JGit 7.3 handles linked worktrees. `.git` can therefore be a file: use `MigrationReport.gitDirectory`, never `new File(sandbox, ".git")` as a directory.
+- **Git LFS** (`lfs.threshold`, `lfs.patterns`). `LfsCleanFilter` is registered as JGit's builtin `lfs` clean filter (`filter.lfs.useJGitBuiltin`). It writes pointers to git and content to `<common git dir>/lfs/objects`, which is where git-lfs looks. `.gitattributes` gets a second generated block after the EWM block. `ewm2zbuilder layout` copies the object store.
 - **Branch point.** `BranchPoint` (pure, unit-tested) walks every branch's first-parent chain and matches each `EWM-ChangeSet` against the stream's per-component delivery order. `WorkspaceProvisioner.acceptConfiguration` accepts the matched prefix into the not-yet-loaded target workspace. The existing resume checks then verify the sandbox against the commit.
 
 z/OS (`zos/`, Phase 3 onward; the EE data model is in `docs/ewm-zos-model.md`):
