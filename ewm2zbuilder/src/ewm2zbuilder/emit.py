@@ -21,12 +21,14 @@ Not generated (flagged in the report): `sources` unless a sources map is given,
 
 from __future__ import annotations
 
+import json
 import re
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 
 import yaml
 
+from .variants import Family, condition_for, find_families, merge_sequences, program_key
 from .model import (
     CALL_COMMAND,
     USAGE_TEMP,
@@ -72,6 +74,9 @@ class Output:
     files: dict[str, str] = field(default_factory=dict)  # filename -> YAML text
     notes: list[Note] = field(default_factory=list)
     properties: list[str] = field(default_factory=list)  # build properties to define
+    # langdef name -> {"task": zBuilder task, "variables": {name: value}}; the contract with `ewm2zbuilder app`
+    language_map: dict[str, dict] = field(default_factory=dict)
+    families: list[Family] = field(default_factory=list)
 
 
 def slug(name: str) -> str:
@@ -95,6 +100,22 @@ def condition_obj(fragment: str):
     if el.tag == "not" and len(el) == 1 and el[0].tag == "isset" and el[0].get("property"):
         return {"notExists": el[0].get("property")}
     return None
+
+
+def _same_step(a, b) -> bool:
+    """Same program, settings and EWM condition; options and DDs may differ."""
+    def bare(step: dict) -> dict:
+        return {k: v for k, v in step.items() if k not in ("step", "parm", "dds")}
+    return bare(a[1]) == bare(b[1]) and a[2] == b[2]
+
+
+def combine_conditions(feature: str | None, ewm):
+    """A CICS/SQL condition (JEXL) and an EWM condition (exists/notExists) on the same step."""
+    if not feature:
+        return ewm or None
+    if not ewm:
+        return feature
+    return {**ewm, "eval": feature}
 
 
 def _space_options(d: DataSetDef) -> list[str]:
@@ -262,19 +283,26 @@ class _Converter:
                 if cond is None:
                     self.note(ld.name, f"translator {name!r}", f"unsupported condition {ld.conditions[i]!r}")
             steps.append(self.step(t, cond, ld, datasets))
-            for k, v in t.variables.items():
-                if k in variables and variables[k] != v:
-                    self.note(ld.name, f"variable {k}", f"conflicting values; keeping {variables[k]!r}")
-                variables.setdefault(k, v)
+            self.merge_variables(variables, t, ld.name)
+        return self.task(ld.name, ld, [ld.name, ld.language_code], steps, variables, datasets)
 
-        task: dict = {"language": ld.name}
-        sources = self.sources_map.get(ld.name) or self.sources_map.get(ld.language_code)
+    def merge_variables(self, variables: dict, t: Translator, ld_name: str) -> None:
+        for k, v in t.variables.items():
+            if k in variables and variables[k] != v:
+                self.note(ld_name, f"variable {k}", f"conflicting values; keeping {variables[k]!r}")
+            variables.setdefault(k, v)
+
+    def task(self, name: str, ld: LangDef, source_keys: list[str], steps: list[dict], variables: dict,
+             datasets: dict, extra_variables: list[dict] | None = None) -> dict:
+        task: dict = {"language": name}
+        sources = next((self.sources_map[k] for k in source_keys if self.sources_map.get(k)), None)
         if sources:
             task["sources"] = sources
         else:
-            self.note(ld.name, "sources", "no file patterns known; add via --sources-map")
-        if variables:
-            task["variables"] = [{"name": k, "value": v} for k, v in variables.items()]
+            self.note(name, "sources", "no file patterns known; add via --sources-map")
+        all_variables = [*(extra_variables or []), *({"name": k, "value": v} for k, v in variables.items())]
+        if all_variables:
+            task["variables"] = all_variables
         if datasets:
             task["datasets"] = [
                 {"name": n, "options": self.create_options(d, member)} for n, (d, member) in datasets.items()
@@ -285,9 +313,106 @@ class _Converter:
                 "step": "copySrc", "type": "copy", "source": "${FILE_PATH}",
                 "target": f"//'{src_ds}(${{MEMBER}})'",
             })
-            self.note(ld.name, "copySrc", "dependencyCopy (copybook/include search) not generated")
+            self.note(name, "copySrc", "dependencyCopy (copybook/include search) not generated")
         task["steps"] = steps
         return task
+
+    # -- variant families ----------------------------------------------
+    def family(self, fam: Family) -> dict:
+        """One task for all variants: steps not shared by every variant get a CICS/SQL condition."""
+        sd = self.sd
+        datasets: dict[str, tuple[DataSetDef | None, bool]] = {}
+        variables: dict[str, str] = {}
+        selects: list[dict] = []
+        steps: list[dict] = []
+        used: set[str] = set()
+        sequences = {}
+        for m in fam.members:
+            ld = sd.langdefs[m]
+            sequences[m] = [
+                (program_key(sd, n), " ".join((ld.conditions[i] if i < len(ld.conditions) else "").split()))
+                for i, n in enumerate(ld.translators)
+            ]
+        for slot in merge_sequences(sequences):
+            groups: dict[str, list[str]] = {}
+            for m, index in slot.items():
+                groups.setdefault(sd.langdefs[m].translators[index], []).append(m)
+            built = []
+            for tname, members in groups.items():
+                ld = sd.langdefs[members[0]]
+                index = slot[members[0]]
+                t = sd.translators.get(tname)
+                if t is None:
+                    self.note(fam.task, f"translator {tname!r}", "not defined in export; skipped")
+                    continue
+                ewm = condition_obj(ld.conditions[index]) if index < len(ld.conditions) else ""
+                if ewm is None:
+                    self.note(fam.task, f"translator {tname!r}", f"unsupported condition {ld.conditions[index]!r}")
+                built.append((members, self.step(t, None, ld, datasets), ewm))
+                self.merge_variables(variables, t, fam.task)
+            if not built:
+                continue
+            present = {fam.values(m) for m in slot}
+
+            if len(built) > 1 and all(_same_step(b, built[0]) for b in built):
+                built = [(list(slot), self.merge_steps(built, fam, selects), built[0][2])]
+            elif len(built) > 1:
+                self.note(fam.task, f"steps {[b[1]['step'] for b in built]}",
+                          "variants run different programs or settings here; emitted one step per variant")
+            for members, step, ewm in built:
+                feature = condition_for({fam.values(m) for m in members}, fam) if len(built) > 1 \
+                    else condition_for(present, fam)
+                steps.append(self.place(step, combine_conditions(feature, ewm), used))
+
+        base = sd.langdefs[fam.task]
+        flags = [{"name": f, "value": False} for f in fam.features]
+        return self.task(fam.task, base, [fam.task, *fam.members, base.language_code], steps, variables,
+                         datasets, flags + selects)
+
+    @staticmethod
+    def merge_steps(built: list, fam: Family, selects: list[dict]) -> dict:
+        """Variants run the same program here: one step, their options chosen per variant (`select`) and
+        their DDs aligned, each DD that not every variant has getting the condition of those that do."""
+        primary = next((b for b in built if fam.task in b[0]), built[0])
+        step = dict(primary[1])
+        parms = [(condition_for({fam.values(m) for m in members}, fam), s.get("parm")) for members, s, _ in built]
+        if len({p for _, p in parms}) > 1:
+            var = re.sub(r"[^A-Za-z0-9]+", "_", step["step"]).strip("_").upper() + "_PARMS"
+            step["parm"] = f"${{{var}}}"
+            selects.append({"name": var, "select": [{"condition": c, "value": p or ""} for c, p in parms]})
+        if any(b[1].get("dds") for b in built):
+            sequences = {i: [json.dumps(dd, sort_keys=True) for dd in b[1].get("dds", [])]
+                         for i, b in enumerate(built)}
+            dds = []
+            for slot in merge_sequences(sequences):
+                i, j = next(iter(slot.items()))
+                dd = FlowDict(built[i][1]["dds"][j])
+                if len(slot) < len(built):
+                    members = [m for k in slot for m in built[k][0]]
+                    cond = combine_conditions(condition_for({fam.values(m) for m in members}, fam),
+                                              dd.pop("condition", None))
+                    dd["condition"] = cond
+                dds.append(dd)
+            step["dds"] = dds
+        return step
+
+    @staticmethod
+    def place(step: dict, cond, used: set[str]) -> dict:
+        """Unique step name; the condition goes before maxRC, where single-variant tasks have it."""
+        name, n = step["step"], 2
+        while name in used:
+            name, n = f"{step['step']}_{n}", n + 1
+        used.add(name)
+        placed: dict = {}
+        for k, v in step.items():
+            if k == "condition":
+                continue
+            if k == "maxRC" and cond:
+                placed["condition"] = cond
+            placed[k] = name if k == "step" else v
+        if cond and "condition" not in placed:
+            placed["condition"] = cond
+        return placed
 
     @staticmethod
     def create_options(d: DataSetDef | None, member: bool) -> str:
@@ -335,16 +460,37 @@ def _dump(doc: dict) -> str:
     return _align_dds(text)
 
 
-def emit_all(sd: SystemDefinition, sources_map: dict[str, list[str]] | None = None) -> Output:
+def emit_all(sd: SystemDefinition, sources_map: dict[str, list[str]] | None = None,
+             variants: bool = True) -> Output:
     conv = _Converter(sd, sources_map)
     out = Output()
+    families, family_notes = find_families(sd) if variants else ([], [])
+    for message in family_notes:
+        conv.note("variants", "grouping", message)
+    member_of = {m: fam for fam in families for m in fam.members}
     tasks: list[str] = []
+    task_variables: dict[str, list[str]] = {}
     for ld in sd.langdefs.values():
-        fname = f"{slug(ld.name)}.yaml"
+        fam = member_of.get(ld.name)
+        task_name = fam.task if fam else ld.name
+        out.language_map[ld.name] = {
+            "task": task_name,
+            "variables": dict(fam.members[ld.name]) if fam else {},
+        }
+        if task_name in tasks:
+            continue
+        task = conv.family(fam) if fam else conv.language(ld)
+        task_variables[task_name] = sorted(v["name"] for v in task.get("variables", []))
+        fname = f"{slug(task_name)}.yaml"
         if fname in out.files:
-            fname = f"{slug(ld.name)}_{len(out.files)}.yaml"
-        out.files[fname] = _dump({"version": SCHEMA_VERSION, "tasks": [conv.language(ld)]})
-        tasks.append(ld.name)
+            fname = f"{slug(task_name)}_{len(out.files)}.yaml"
+        header = ""
+        if fam:
+            header = "# One task for these EWM language definitions (variants of one compiler):\n" + "".join(
+                f"#   {m}: {', '.join(f'{k}={str(v).lower()}' for k, v in vals.items())}\n"
+                for m, vals in fam.members.items())
+        out.files[fname] = header + _dump({"version": SCHEMA_VERSION, "tasks": [task]})
+        tasks.append(task_name)
     out.files["Languages.yaml"] = _dump({
         "version": SCHEMA_VERSION,
         "include": [{"file": f} for f in out.files],
@@ -352,6 +498,9 @@ def emit_all(sd: SystemDefinition, sources_map: dict[str, list[str]] | None = No
         "variables": [{"name": k, "value": v} for k, v in conv.sysvar_values.items()],
     })
     out.files = {"Languages.yaml": out.files.pop("Languages.yaml"), **out.files}
+    for entry in out.language_map.values():
+        entry["taskVariables"] = task_variables[entry["task"]]
     out.notes = conv.notes
     out.properties = list(conv.properties)
+    out.families = families
     return out

@@ -131,8 +131,10 @@ def test_sample_output_matches_schema(tmp_path):
 def test_real_export_matches_schema():
     sd = parse(EXPORT)
     assert (len(sd.dsdefs), len(sd.translators), len(sd.langdefs)) == (1199, 587, 303)
+    assert len(emit_all(sd, variants=False).files) == 304  # 303 languages + Languages.yaml
     out = emit_all(sd)
-    assert len(out.files) == 304  # 303 languages + Languages.yaml
+    assert out.families and len(out.files) == 304 - sum(len(f.members) - 1 for f in out.families)
+    assert set(out.language_map) == set(sd.langdefs)
     validator = Draft202012Validator(json.loads(SCHEMA.read_text()))
     errors = [(f, e.message[:120]) for f, t in out.files.items() for e in validator.iter_errors(yaml.safe_load(t))]
     assert not errors, errors[:5]

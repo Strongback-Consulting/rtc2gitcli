@@ -41,8 +41,19 @@ export SCMTOOLS_HOME=<dest>/scmtools                  # folder containing eclips
 cd ewm2zbuilder
 uv run --group dev pytest -q                                   # all tests
 uv run --group dev pytest -q tests/test_convert.py::test_emit_step_shape
-uv run ewm2zbuilder <export.xml> -o out --schema <schema.json> [--sources-map map.yaml]
+uv run ewm2zbuilder <export.xml> -o out --schema <schema.json> [--sources-map map.yaml] [--no-variants]
+uv run ewm2zbuilder app <repo>/.ewm/zos-metadata.json --language-map out/language-map.yaml -o <repo>/dbb-app.yaml --schema <schema.json>
 ```
+
+- **Shared configuration.** The conversion writes `Languages.yaml` plus one language-task YAML per language definition. Exception: `variants.py` merges language definitions that are CICS/DB2 variants of one compiler into one task (same language code, same name without CICS/DB2/SQL words, same compiler, one definition per feature combination).
+  - Steps not every variant runs get `${IS_CICS}`/`${IS_SQL}` conditions.
+  - Steps running the same program become one step: options come from a `select` variable, and DDs only some variants have get conditions.
+  - Near misses are listed in `conversion-report.txt`.
+- **`language-map.yaml`** (not a zBuilder file) maps every language definition to its task, variant variables and task variables. It is the contract with `app`.
+- **`app`** (`app.py`) builds `dbb-app.yaml` from the metadata `migrate-to-git` commits into the repository.
+  - `sources` use folder globs where a zFolder's members all belong to one task, and member paths otherwise (a per-file override).
+  - Variant variables and EWM file-level build variables become `forFiles` variables.
+  - Paths use the target layout (`zOSsrc` → `src`, `--rename`).
 
 Neither the IBM zBuilder schema nor any client export is committed. Tests find them through `EWM2ZBUILDER_SCHEMA` and `EWM2ZBUILDER_EXPORT`, or in the git-ignored `ewm2zbuilder/schema/` and `ewm2zbuilder/local/` folders, and skip when they are absent. This repo is public: never commit client system definitions, data set names, or generated output.
 

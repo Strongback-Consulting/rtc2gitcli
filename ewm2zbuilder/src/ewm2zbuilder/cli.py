@@ -1,4 +1,8 @@
-"""Command line: ewm2zbuilder EXPORT.xml -o OUTDIR"""
+"""Command line.
+
+  ewm2zbuilder EXPORT.xml -o OUTDIR        system definitions -> shared zBuilder configuration
+  ewm2zbuilder app METADATA --language-map OUTDIR/language-map.yaml -o dbb-app.yaml
+"""
 
 from __future__ import annotations
 
@@ -13,6 +17,8 @@ import yaml
 from .emit import Output, emit_all
 from .parser import parse
 from .resolve import check
+
+LANGUAGE_MAP = "language-map.yaml"
 
 
 def validate(out: Output, schema_path: Path) -> list[str]:
@@ -34,6 +40,11 @@ def write_report(path: Path, issues, out: Output, schema_errors: list[str]) -> N
     if schema_errors:
         lines += [f"SCHEMA ERRORS ({len(schema_errors)})", *schema_errors, ""]
     lines += [f"UNRESOLVED REFERENCES ({len(issues)})", *map(str, issues), ""]
+    lines.append(f"VARIANT FAMILIES ({len(out.families)}): one task each, variants set per file in dbb-app.yaml")
+    for fam in out.families:
+        lines.append(f"  {fam.task}")
+        lines += [f"    {m}: {vals}" for m, vals in fam.members.items()]
+    lines.append("")
     groups = collections.defaultdict(list)
     for n in out.notes:
         # Group by message with quoted names removed so repeats collapse.
@@ -46,7 +57,52 @@ def write_report(path: Path, issues, out: Output, schema_errors: list[str]) -> N
     path.write_text("\n".join(lines) + "\n")
 
 
+def app_main(argv: list[str]) -> int:
+    """ewm2zbuilder app METADATA --language-map MAP -o dbb-app.yaml"""
+    import json
+
+    from .app import DEFAULT_RENAMES, build
+    from .emit import SCHEMA_VERSION, _dump
+
+    ap = argparse.ArgumentParser(prog="ewm2zbuilder app",
+                                 description="dbb-app.yaml from .ewm/zos-metadata.json of a migrated repository")
+    ap.add_argument("metadata", type=Path, help=".ewm/zos-metadata.json written by scm migrate-to-git")
+    ap.add_argument("--language-map", type=Path, required=True,
+                    help=f"{LANGUAGE_MAP} written by the system definition conversion")
+    ap.add_argument("-o", "--out", type=Path, default=Path("dbb-app.yaml"))
+    ap.add_argument("--rename", action="append", metavar="OLD=NEW",
+                    help="folder renamed by the repository layout (default zOSsrc=src); 'none' for no renames")
+    ap.add_argument("--path-prefix", default="**/", help="prefix of every file pattern (default **/)")
+    ap.add_argument("--schema", type=Path, help="zBuilder JSON schema; validate the result")
+    args = ap.parse_args(argv)
+
+    renames = DEFAULT_RENAMES
+    if args.rename:
+        renames = () if args.rename == ["none"] else tuple(tuple(r.split("=", 1)) for r in args.rename)
+    config = build(json.loads(args.metadata.read_text()), yaml.safe_load(args.language_map.read_text()) or {},
+                   SCHEMA_VERSION, renames, args.path_prefix)
+    text = _dump(config.document)
+    errors = []
+    if args.schema:
+        from jsonschema import Draft202012Validator
+
+        validator = Draft202012Validator(json.loads(args.schema.read_text()))
+        errors = [f"{e.message[:200]} (at {'/'.join(map(str, e.absolute_path))})"
+                  for e in validator.iter_errors(config.document)]
+    args.out.parent.mkdir(parents=True, exist_ok=True)
+    args.out.write_text(text)
+    for note in config.notes:
+        print(f"note: {note}", file=sys.stderr)
+    for error in errors:
+        print(f"schema: {error}", file=sys.stderr)
+    print(f"wrote {args.out}: {len(config.document['tasks'])} task(s); {len(config.notes)} note(s)")
+    return 1 if errors else 0
+
+
 def main(argv: list[str] | None = None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
+    if argv[:1] == ["app"]:
+        return app_main(argv[1:])
     ap = argparse.ArgumentParser(prog="ewm2zbuilder", description=__doc__)
     ap.add_argument("export", type=Path, help="EWM system definition export (XML)")
     ap.add_argument("-o", "--out", type=Path, default=Path("zbuilder-out"))
@@ -54,6 +110,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--sources-map", type=Path,
                     help="YAML mapping langdef name or language code (COB, ASM, ...) to a list of glob patterns")
     ap.add_argument("--schema", type=Path, help="zBuilder JSON schema; validate every emitted file")
+    ap.add_argument("--no-variants", action="store_true",
+                    help="one task per language definition; do not merge CICS/DB2 variants of one compiler")
     args = ap.parse_args(argv)
 
     sd = parse(args.export)
@@ -71,13 +129,17 @@ def main(argv: list[str] | None = None) -> int:
     for key in sources_map or {}:
         if key not in sd.langdefs and key not in {l.language_code for l in sd.langdefs.values()}:
             print(f"warning: sources map key {key!r} matches no language definition or code", file=sys.stderr)
-    out = emit_all(sd, sources_map)
+    out = emit_all(sd, sources_map, variants=not args.no_variants)
     schema_errors = validate(out, args.schema) if args.schema else []
 
     for fname, text in out.files.items():
         path = args.out / fname
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text)
+    # not a zBuilder file: the contract with `ewm2zbuilder app` (language definition -> task + variables)
+    (args.out / LANGUAGE_MAP).write_text(
+        "# EWM language definition -> zBuilder language task and the variables that select its variant\n"
+        + yaml.safe_dump(out.language_map, sort_keys=True, width=100_000))
     report = args.out / "conversion-report.txt"
     write_report(report, issues, out, schema_errors)
     print(f"wrote {len(out.files)} file(s) to {args.out}; {len(out.notes)} item(s) need review "
