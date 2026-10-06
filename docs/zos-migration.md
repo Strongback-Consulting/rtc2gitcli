@@ -42,6 +42,19 @@ The shared configuration (step 2) goes to a separate build configuration reposit
 
 The mirror keeps EWM's paths: resume and the byte-for-byte check against `scm load` need them. `ewm2zbuilder layout` writes the application repository with `zOSsrc` renamed to `src` in every commit, and in the paths inside `.gitattributes`, `.gitignore` and the metadata file. Authors, dates, messages, `EWM-ChangeSet` trailers and tags are kept. Running it again on a longer mirror reproduces the same commits for the same history. The last commit adds `dbb-app.yaml`.
 
+## Verified on EWM 7.2
+
+IBM's Mortgage sample, "Mortgage Development Stream" (5 components, 11 change sets), was run through steps 1 and 3. Step 2 was not run: there is no system definition export of the sample, so a hand-written `language-map.yaml` stood in for it.
+- **Step 1:** created both workspaces, loaded the target and migrated.
+  - The mirror's HEAD is byte-identical to `scm load` of the source workspace (57 files).
+  - `.ewm/zos-metadata.json` changes in exactly the three property-only change sets that assign the definitions.
+  - Members carry `zos-working-tree-encoding=IBM-1047`.
+  - A rerun adds nothing.
+- **Step 3:**
+  - Commits, tags and file contents are unchanged, under `src/` instead of `zOSsrc/`.
+  - `dbb-app.yaml` validates against the schema.
+  - It puts the mixed `MortgageApplication-JKECMORT/src/COBOL` folder's CICS and CICS+DB2 members in one task with per-file `IS_CICS`/`IS_SQL`, and the batch member in its own task.
+
 ## Not verified yet
 
 A zBuilder build of a migrated application in a DBB environment. The YAML is validated against the zBuilder schema only. Open questions for that build:

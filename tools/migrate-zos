@@ -51,7 +51,8 @@ TARGET_WS=${TARGET_WS:-rtc2git-$SLUG-target}
 SCHEMA_ARG=
 [ -z "$SCHEMA" ] || SCHEMA_ARG="--schema $SCHEMA"
 
-mkdir -p "$WORK/mirror"
+# an empty .jazz5 makes a new directory acceptable to scm as the sandbox given with -d
+mkdir -p "$WORK/mirror/.jazz5"
 WORK=$(cd "$WORK" && pwd)
 
 echo "== 1/3 migrate [$STREAM] into $WORK/mirror"

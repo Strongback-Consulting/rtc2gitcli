@@ -142,9 +142,11 @@ public abstract class MigrateTo extends AbstractSubcommand implements ISubcomman
 			if (provision && !subargs.hasOption(CommonOptions.OPT_DIRECTORY)
 					&& SubcommandUtil.findAncestorCFARoot(sandboxDirectory.getAbsolutePath()) == null) {
 				// outside a sandbox, scm runs every sub-command in a scratch area: the load of the target would
-				// register the new sandbox with a second daemon of this process and fail
-				throw new IllegalStateException("--stream needs the sandbox directory: pass -d <existing empty"
-						+ " directory>, or run inside a sandbox the target workspace is loaded in");
+				// register the new sandbox with a second daemon of this process and fail. With -d, scm requires
+				// the directory to be a sandbox already ("not shared"), which an empty .jazz5 folder satisfies.
+				throw new IllegalStateException("--stream needs the sandbox directory: create it with an empty"
+						+ " .jazz5 folder (mkdir -p <dir>/.jazz5) and pass -d <dir>, or run inside a sandbox the"
+						+ " target workspace is loaded in");
 			}
 
 			// Initialize connection to RTC
