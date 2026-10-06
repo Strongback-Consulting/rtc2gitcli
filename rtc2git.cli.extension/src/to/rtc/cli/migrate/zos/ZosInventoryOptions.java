@@ -19,8 +19,9 @@ public class ZosInventoryOptions implements IOptionSource {
 	public Options getOptions() throws ConflictingOptionException {
 		Options options = new Options(false);
 		SubcommandUtil.addRepoLocationToOptions(options);
-		options.addOption(new PositionalOptionDefinition(OPT_SELECTOR, "workspace", 1, 1), //$NON-NLS-1$
-				"Stream or repository workspace to inventory (name, alias or UUID).");
+		options.addOption(new PositionalOptionDefinition(OPT_SELECTOR, "workspace", 1, -1), //$NON-NLS-1$
+				"Streams or repository workspaces to inventory (name, alias or UUID); several are reported"
+						+ " together, with components named <stream>/<component>.");
 		options.addOption(new NamedOptionDefinition(OPT_OUTPUT, "o", "output", 1),
 				"Write the full inventory (every file and folder) as JSON into this file.");
 		options.addOption(new NamedOptionDefinition(OPT_COMPONENTS, "C", "components", -1),

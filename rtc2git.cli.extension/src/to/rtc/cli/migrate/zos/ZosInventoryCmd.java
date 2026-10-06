@@ -2,6 +2,7 @@ package to.rtc.cli.migrate.zos;
 
 import java.io.File;
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -27,6 +28,7 @@ import com.ibm.team.repository.client.ITeamRepository;
 import com.ibm.team.repository.common.TeamRepositoryException;
 import com.ibm.team.rtc.cli.infrastructure.internal.core.ISubcommand;
 import com.ibm.team.rtc.cli.infrastructure.internal.parser.ICommandLine;
+import com.ibm.team.rtc.cli.infrastructure.internal.parser.ICommandLineArgument;
 import com.ibm.team.scm.client.SCMPlatform;
 import com.ibm.team.scm.common.IComponent;
 import com.ibm.team.scm.common.IWorkspace;
@@ -42,36 +44,46 @@ public class ZosInventoryCmd extends AbstractSubcommand implements ISubcommand {
 	public void run() throws FileSystemException {
 		ChangeLogStreamOutput output = new ChangeLogStreamOutput(config.getContext().stdout());
 		ICommandLine subargs = config.getSubcommandCommandLine();
-		ScmCommandLineArgument selector = ScmCommandLineArgument
-				.create(subargs.getOptionValue(ZosInventoryOptions.OPT_SELECTOR), config);
-		SubcommandUtil.validateArgument(selector, ItemType.WORKSPACE);
+		List<ICommandLineArgument> selectorArgs = subargs.getOptionValues(ZosInventoryOptions.OPT_SELECTOR);
+		List<ScmCommandLineArgument> selectors = new ArrayList<ScmCommandLineArgument>();
+		for (ICommandLineArgument argument : selectorArgs) {
+			ScmCommandLineArgument selector = ScmCommandLineArgument.create(argument, config);
+			SubcommandUtil.validateArgument(selector, ItemType.WORKSPACE);
+			selectors.add(selector);
+		}
 		IFilesystemRestClient client = SubcommandUtil.setupDaemon(config);
-		ITeamRepository repository = RepoUtil.loginUrlArgAncestor(config, client, selector);
-		IWorkspace workspace = RepoUtil.getWorkspace(selector.getItemSelector(), true, true, repository, config);
+		ITeamRepository repository = RepoUtil.loginUrlArgAncestor(config, client, selectors.get(0));
 		Set<String> only = new HashSet<String>();
 		if (subargs.hasOption(ZosInventoryOptions.OPT_COMPONENTS)) {
 			only.addAll(subargs.getOptions(ZosInventoryOptions.OPT_COMPONENTS));
 		}
 
 		try {
-			EwmChangeSetDetails reader = new EwmChangeSetDetails(repository, workspace);
+			// with several streams, components are named "<stream>/<component>"
 			Map<String, List<FileProperties>> components = new LinkedHashMap<String, List<FileProperties>>();
-			List<?> handles = SCMPlatform.getWorkspaceManager(repository)
-					.getWorkspaceConnection(workspace, new NullProgressMonitor()).getComponents();
-			List<?> items = repository.itemManager().fetchCompleteItems(handles, IItemManager.DEFAULT,
-					new NullProgressMonitor());
-			for (Object item : items) {
-				IComponent component = (IComponent) item;
-				if (only.isEmpty() || only.contains(component.getName())) {
-					output.writeLine("Reading component [" + component.getName() + "]");
-					components.put(component.getName(), reader.readComponent(component));
+			List<String> workspaces = new ArrayList<String>();
+			for (ScmCommandLineArgument selector : selectors) {
+				IWorkspace workspace = RepoUtil.getWorkspace(selector.getItemSelector(), true, true, repository,
+						config);
+				workspaces.add(workspace.getName());
+				String prefix = selectors.size() > 1 ? workspace.getName() + "/" : "";
+				EwmChangeSetDetails reader = new EwmChangeSetDetails(repository, workspace);
+				List<?> handles = SCMPlatform.getWorkspaceManager(repository)
+						.getWorkspaceConnection(workspace, new NullProgressMonitor()).getComponents();
+				List<?> items = repository.itemManager().fetchCompleteItems(handles, IItemManager.DEFAULT,
+						new NullProgressMonitor());
+				for (Object item : items) {
+					IComponent component = (IComponent) item;
+					if (only.isEmpty() || only.contains(component.getName())) {
+						output.writeLine("Reading component [" + prefix + component.getName() + "]");
+						components.put(prefix + component.getName(), reader.readComponent(component));
+					}
 				}
 			}
 			ZosInventory inventory = new ZosInventory(components, SystemDefinitions.create(repository));
 			Map<String, Object> document = new LinkedHashMap<String, Object>();
 			document.put("tool", "rtc2gitcli migrate-inventory");
-			document.put("selector", selector.getStringValue());
-			document.put("workspace", workspace.getName());
+			document.put("workspaces", workspaces);
 			document.putAll(inventory.toMap());
 			printSummary(output, document);
 			if (subargs.hasOption(ZosInventoryOptions.OPT_OUTPUT)) {

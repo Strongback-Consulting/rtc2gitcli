@@ -140,6 +140,36 @@ public class ZosInventoryTest {
 	}
 
 	@Test
+	@SuppressWarnings("unchecked")
+	public void testReportsFileLevelVariableOverridesAndCodePages() {
+		Map<String, String> special = new HashMap<String, String>();
+		special.put(ZosProperties.LANGUAGE_DEFINITION, COBOL);
+		special.put(ZosProperties.BUILD_VARIABLE_PREFIX + "CBLCMPOPTS", "LIB,RENT,NODYNAM");
+		special.put(ZosProperties.MVS_CODE_PAGE, "IBM-037");
+		Map<String, String> other = new HashMap<String, String>();
+		other.put(ZosProperties.LANGUAGE_DEFINITION, COBOL);
+		other.put(ZosProperties.BUILD_VARIABLE_PREFIX + "CBLCMPOPTS", "LIB,RENT");
+		Map<String, List<FileProperties>> components = mortgage();
+		List<FileProperties> items = new java.util.ArrayList<FileProperties>(components.get("Mortgage"));
+		items.add(FileProperties.file("i:S", "App/zOSsrc/COBOL/SPECIAL.cbl", LineDelimiter.LF, "text/plain", "UTF-8",
+				false, special));
+		items.add(FileProperties.file("i:O", "App/zOSsrc/COBOL/OTHER.cbl", LineDelimiter.LF, "text/plain", "UTF-8",
+				false, other));
+		components.put("Mortgage", items);
+
+		ZosInventory inventory = new ZosInventory(components, RESOLVER);
+		Map<String, Object> summary = inventory.summary();
+
+		Map<String, Object> override = ((Map<String, Map<String, Object>>) summary.get("buildVariableOverrides"))
+				.get("CBLCMPOPTS");
+		assertEquals(Integer.valueOf(2), override.get("files"));
+		assertEquals(2, ((Map<String, Integer>) override.get("values")).size());
+		assertEquals("COBOL compile",
+				((Map<String, String>) override.get("overriddenIn")).get("Mortgage:App/zOSsrc/COBOL/SPECIAL.cbl"));
+		assertEquals(Collections.singletonMap("IBM-037", Integer.valueOf(1)), summary.get("filesByMvsCodePage"));
+	}
+
+	@Test
 	public void testBuildVariables() {
 		Map<String, String> properties = new HashMap<String, String>();
 		properties.put(ZosProperties.BUILD_VARIABLE_PREFIX + "PARM", "LIST,MAP");

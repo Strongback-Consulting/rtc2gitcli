@@ -12,8 +12,17 @@ public final class ZosProperties {
 	public static final String LANGUAGE_DEFINITION = "team.enterprise.language.definition";
 	/** On a folder (zFolder): item UUID of its data set definition. */
 	public static final String RESOURCE_DEFINITION = "team.enterprise.resource.definition";
-	/** Prefix of per-file build variables; the rest of the key is the variable name. */
+	/**
+	 * Prefix of per-file build variables; the rest of the key is the name of the translator variable the file
+	 * overrides (for example <code>CBLCMPOPTS</code>).
+	 */
 	public static final String BUILD_VARIABLE_PREFIX = "team.enterprise.build.var.";
+	/** On a file: MVS code page of the member (when it differs from the default). */
+	public static final String MVS_CODE_PAGE = "mvsCodePage";
+	/** On a file: <code>true</code> if the build always loads the member. */
+	public static final String ALWAYS_LOAD = "team.enterprise.build.alwaysload";
+	/** On a file: <code>true</code> if changes to the member do not trigger dependent builds. */
+	public static final String IGNORE_FOR_DEPENDENCY_BUILD = "team.enterprise.build.changes.ignoreForDependencyBuild";
 
 	private ZosProperties() {
 	}

@@ -114,6 +114,13 @@ public final class ZosInventory {
 		if (dataSet != null) {
 			map.put("dataSetDefinition", nameOf(dataSet));
 		}
+		Map<String, String> variables = ZosProperties.buildVariables(item.getUserProperties());
+		if (!variables.isEmpty()) {
+			map.put("buildVariables", variables);
+		}
+		if (item.getUserProperties().containsKey(ZosProperties.MVS_CODE_PAGE)) {
+			map.put("mvsCodePage", item.getUserProperties().get(ZosProperties.MVS_CODE_PAGE));
+		}
 		if (!item.getUserProperties().isEmpty()) {
 			map.put("userProperties", item.getUserProperties());
 		}
@@ -131,6 +138,8 @@ public final class ZosInventory {
 		Map<String, Integer> encodings = new TreeMap<String, Integer>();
 		Map<String, Integer> contentTypes = new TreeMap<String, Integer>();
 		Map<String, Integer> propertyKeys = new TreeMap<String, Integer>();
+		Map<String, Map<String, Object>> overrides = new TreeMap<String, Map<String, Object>>();
+		Map<String, Integer> codePages = new TreeMap<String, Integer>();
 		Map<String, Object> zFolders = new TreeMap<String, Object>();
 		List<String> membersWithoutLanguage = new ArrayList<String>();
 		List<String> languageOutsideZFolder = new ArrayList<String>();
@@ -162,6 +171,15 @@ public final class ZosInventory {
 					continue;
 				}
 				files++;
+				for (Map.Entry<String, String> variable : ZosProperties.buildVariables(item.getUserProperties())
+						.entrySet()) {
+					addOverride(overrides, variable.getKey(), variable.getValue(), qualifiedPath,
+							nameOf(item.getUserProperties().get(ZosProperties.LANGUAGE_DEFINITION)));
+				}
+				String codePage = item.getUserProperties().get(ZosProperties.MVS_CODE_PAGE);
+				if (codePage != null) {
+					increment(codePages, codePage);
+				}
 				increment(encodings, String.valueOf(item.getEncoding()));
 				increment(contentTypes, String.valueOf(item.getContentType()));
 				String parent = parent(item.getPath());
@@ -192,11 +210,33 @@ public final class ZosInventory {
 		summary.put("filesByEncoding", encodings);
 		summary.put("filesByContentType", contentTypes);
 		summary.put("userPropertyKeys", propertyKeys);
+		summary.put("buildVariableOverrides", overrides);
+		summary.put("filesByMvsCodePage", codePages);
 		summary.put("zFolderLanguages", zFolders);
 		summary.put("membersWithoutLanguageDefinition", membersWithoutLanguage);
 		summary.put("languageDefinitionOutsideZFolder", languageOutsideZFolder);
 		summary.put("unresolvedDefinitions", Integer.valueOf(unresolved.size()));
 		return summary;
+	}
+
+	/**
+	 * Per variable: how many files override it, with which values, and in which files (with their language
+	 * definition, as the variable belongs to that definition's translators).
+	 */
+	@SuppressWarnings("unchecked")
+	private static void addOverride(Map<String, Map<String, Object>> overrides, String variable, String value,
+			String file, String language) {
+		Map<String, Object> entry = overrides.get(variable);
+		if (entry == null) {
+			entry = new LinkedHashMap<String, Object>();
+			entry.put("files", Integer.valueOf(0));
+			entry.put("values", new TreeMap<String, Integer>());
+			entry.put("overriddenIn", new TreeMap<String, String>());
+			overrides.put(variable, entry);
+		}
+		entry.put("files", Integer.valueOf(((Integer) entry.get("files")).intValue() + 1));
+		increment((Map<String, Integer>) entry.get("values"), value);
+		((Map<String, String>) entry.get("overriddenIn")).put(file, language == null ? "(none)" : language);
 	}
 
 	private static String parent(String path) {
