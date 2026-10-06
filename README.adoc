@@ -99,7 +99,7 @@ The Git repository is the sandbox itself. Push it when the migration is done:
 ----
 git -C sandbox remote add origin <url>
 git -C sandbox push origin --all && git -C sandbox push origin --tags
-git -C sandbox lfs push --all origin    # only with lfs.* enabled
+git -C sandbox lfs push --all origin    # only with lfs.* enabled (needs git-lfs)
 ----
 
 Before migrating, `-L` lists the baselines and change sets without changing anything.
@@ -165,10 +165,19 @@ tools/migrate-zos -r ewm -s "<stream>" -x sysdefs.xml -w work -t app-repo -c <zB
 
 See link:docs/zos-migration.md[] for the flow and the mapping rules, and link:docs/ewm-zos-model.md[] for how EWM stores this metadata.
 
+[[ewm-work-items]]
+== Linking commits to EWM work items
+
+EWM's Git integration links work items to Git commits when they are pushed to a repository registered in EWM. Three steps give migrated commits these links (details in link:docs/ewm-git-integration.md[]):
+
+. *Before migrating,* set `rtc.workitem.number.format=#%s`. The integration recognizes `#73`, but not the bare `73` the default writes.
+. *Register* the repository with `tools/register-git-repo`, which runs the EWM Git Server Toolkit's registration script.
+. *Push* the history with `tools/push-history`, a few commits per push. Webhooks list a limited number of commits per push (GitLab 20, GitHub 2048).
+
 == Limitations
 
 * EWM does not record merges, so the branches have no merge commits. A change set delivered to several streams becomes a commit on each branch, with the same `EWM-ChangeSet` trailer.
-* Work items are carried only as numbers and summaries in commit messages. Linking the commits back to EWM work items through the Git Server Toolkit is a separate step.
+* Work items are carried as numbers and summaries in commit messages. EWM links them to the commits once the repository is registered and pushed (see <<ewm-work-items>>).
 * The z/OS output has been validated against the zBuilder schema, but not yet built with DBB.
 
 == Development

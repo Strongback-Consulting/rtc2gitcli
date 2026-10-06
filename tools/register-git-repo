@@ -1,0 +1,64 @@
+#!/bin/sh
+# Registers a migrated Git repository with EWM through the EWM Git Server Toolkit, so that EWM links
+# work items to the commits pushed to it (see docs/ewm-git-integration.md).
+#
+# Usage: tools/register-git-repo -k <toolkit-dir> -r <ewm-uri> -u <user> -p <project area> -n <name>
+#                                -g <git-url> [-s <hosting server>] [-d <description>] [-P] [-i] [-x]
+#
+#   -k  folder of the extracted Git Server Toolkit (contains rtcgit-admin-scripts)
+#   -r  EWM repository URI, for example https://host:9443/ccm
+#   -u  user ID; the toolkit asks for the password (not echoed, not on the command line)
+#   -p  project area that owns the Git repository
+#   -n  name of the Git repository in EWM
+#   -g  URL developers clone the repository from (the URL EWM shows in commit links)
+#   -s  hosting server: NONE (Node.js or Apache server with the toolkit's hooks, default), GITHUB,
+#       GITHUB_ENTERPRISE, GITLAB or GERRIT
+#   -d  description (default: "Migrated from EWM by rtc2gitcli")
+#   -P  no process: EWM's process (ownerPresent) does not apply to pushes to this repository
+#   -i  do not verify EWM's TLS certificate (test servers with a self-signed certificate)
+#   -x  print the toolkit command instead of running it
+#
+# Needs Node.js and the toolkit's dependencies (npm install in <toolkit-dir>/rtcgit-admin-scripts).
+# Map branches to team areas afterwards with the toolkit's UpdateGitRepository.js (refMappings).
+set -eu
+
+TOOLKIT= URI= USER_ID= PROJECT_AREA= NAME= GIT_URL= SERVER=NONE NO_PROCESS= INSECURE= DRY=
+DESCRIPTION="Migrated from EWM by rtc2gitcli"
+while getopts k:r:u:p:n:g:s:d:Pix opt; do
+  case $opt in
+    k) TOOLKIT=$OPTARG ;; r) URI=$OPTARG ;; u) USER_ID=$OPTARG ;; p) PROJECT_AREA=$OPTARG ;;
+    n) NAME=$OPTARG ;; g) GIT_URL=$OPTARG ;; s) SERVER=$OPTARG ;; d) DESCRIPTION=$OPTARG ;;
+    P) NO_PROCESS=1 ;; i) INSECURE=1 ;; x) DRY=1 ;;
+    *) sed -n '2,22p' "$0" >&2; exit 2 ;;
+  esac
+done
+for required in TOOLKIT URI USER_ID PROJECT_AREA NAME GIT_URL; do
+  eval "value=\${$required}"
+  [ -n "$value" ] || { echo "missing option for $required (see $0 header)" >&2; exit 2; }
+done
+case $SERVER in
+  NONE|GITHUB|GITHUB_ENTERPRISE|GITLAB|GERRIT) ;;
+  *) echo "hosting server must be NONE, GITHUB, GITHUB_ENTERPRISE, GITLAB or GERRIT" >&2; exit 2 ;;
+esac
+SCRIPTS=$TOOLKIT/rtcgit-admin-scripts
+[ -f "$SCRIPTS/RegisterGitRepository.js" ] || { echo "no rtcgit-admin-scripts in $TOOLKIT" >&2; exit 1; }
+
+# key:value arguments as the toolkit expects them; the password is asked for (prompt:true)
+set -- "hostUrl:$URI" "userId:$USER_ID" "prompt:true" "projectareaName:$PROJECT_AREA" "url:$GIT_URL" \
+  "repoName:$NAME" "description:$DESCRIPTION" "hostingServer:$SERVER" "showRegisteredRepo:true"
+# without it the toolkit applies EWM's process (its default)
+[ -z "$NO_PROCESS" ] || set -- "$@" "ownerPresent:false"
+[ -z "$INSECURE" ] || set -- "$@" "verifySSLCert:false"
+if [ -n "$DRY" ]; then
+  printf 'cd %s && node RegisterGitRepository.js' "$SCRIPTS"
+  for arg in "$@"; do printf " '%s'" "$arg"; done
+  printf '\n'
+  exit 0
+fi
+command -v node >/dev/null || { echo "Node.js not found on the PATH" >&2; exit 1; }
+[ -d "$SCRIPTS/node_modules" ] || { echo "run 'npm install' in $SCRIPTS first" >&2; exit 1; }
+# fixes for the toolkit on current Node.js and EWM 7.2 (see the file)
+NODE_OPTIONS="${NODE_OPTIONS:+$NODE_OPTIONS }--require $(cd "$(dirname "$0")" && pwd)/lib/toolkit-node-compat.js"
+export NODE_OPTIONS
+cd "$SCRIPTS"
+exec node RegisterGitRepository.js "$@"

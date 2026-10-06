@@ -66,7 +66,9 @@ uv run ewm2zbuilder layout <mirror> <target> [--language-map out/language-map.ya
 
 Neither the IBM zBuilder schema nor any client export is committed. Tests find them through `EWM2ZBUILDER_SCHEMA` and `EWM2ZBUILDER_EXPORT`, or in the git-ignored `ewm2zbuilder/schema/` and `ewm2zbuilder/local/` folders, and skip when they are absent. This repo is public: never commit client system definitions, data set names, or generated output.
 
-End-to-end testing against a live EWM server is described in `docs/e2e-testing.md`. The z/OS flow (`tools/migrate-zos`: mirror → shared zBuilder configuration → application repository) is described in `docs/zos-migration.md`.
+End-to-end testing against a live EWM server is described in `docs/e2e-testing.md`.
+
+After migrating, `tools/register-git-repo` registers the repository with EWM through IBM's Git Server Toolkit (Node.js, `prompt:true`, so no password on the command line). `tools/push-history` pushes in steps of a few commits so webhooks list every commit. Work item links need `#<number>` in commit messages (`rtc.workitem.number.format=#%s`). See `docs/ewm-git-integration.md`. The z/OS flow (`tools/migrate-zos`: mirror → shared zBuilder configuration → application repository) is described in `docs/zos-migration.md`.
 
 ## Architecture
 
