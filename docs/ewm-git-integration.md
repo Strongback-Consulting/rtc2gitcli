@@ -31,7 +31,7 @@ tools/register-git-repo -k <Git Server Toolkit> -r https://ewm.example.com:9443/
 ```
 
 - **`-s` (hosting server):** `NONE` for the toolkit's Node.js server or Apache with the toolkit's hooks; otherwise `GITHUB`, `GITHUB_ENTERPRISE`, `GITLAB` or `GERRIT`.
-- **`-P` (no process):** registers the repository without EWM process. The toolkit's pre-receive hook checks pushes against the project area's process. Preconditions such as "commits must reference a work item" would reject history from before the integration. Turn the process on after the import:
+- **`-P` (no process):** registers the repository without EWM process. With process, the project area's preconditions apply to pushes, and one such as "commits must reference a work item" would reject history from before the integration. Permissions are checked either way: every pushing user needs the permission for the *Git Push* operation (`CRRTC8822E` otherwise). Turn the process on after the import:
 
   ```bash
   node UpdateGitRepository.js hostUrl:"<uri>" userId:"<user>" prompt:"true" searchUrl:"<clone URL>" ownerPresent:"true"
@@ -46,6 +46,7 @@ Requirements found on a live EWM 7.2 server:
   - IBM Engineering Lifecycle Management solution – Practitioner;
   - IBM Engineering Workflow Management – Developer;
   - IBM Engineering Workflow Management – Developer for IBM Enterprise Platforms.
+- **Authorizing Git requests:** every user who pushes to a server with the toolkit's hooks must select "Authorize Git Requests" once in the EWM web client, logged in as themselves. Until they do, the Git server rejects even a fetch with `CRRTC8814E` (HTTP 403). The server's check is anonymous, so it can be tested without a password: POST `gitUser=<user>&repositoryKey=<key>` with the header `x-com-ibm-team-git-auth: true` to `<EWM URI>/service/com.ibm.team.git.common.internal.IGitOperationInvokeService/ValidateAccess`. It answers 200 once the user is authorized.
 - **Node.js compatibility:** the toolkit's 7.2 scripts do not run on current Node.js as shipped. `tools/register-git-repo` preloads `tools/lib/toolkit-node-compat.js`, which changes no IBM file:
   - it restores `util.log`, removed in Node.js 23;
   - it drops the empty `cookie` header the toolkit sends after its anonymous pre-login. EWM 7.2 with form login sets no cookie there, and Node.js rejects the header.
@@ -88,9 +89,20 @@ node UpdateGitRepository.js hostUrl:"<uri>" userId:"<user>" prompt:"true" search
 - `node GetGitRepository.js hostUrl:"<uri>" userId:"<user>" prompt:"true" searchUrl:"<clone URL>" showDetails:"true"` shows the registration.
 - The `EWM-ChangeSet` trailer of each commit names the change set it came from. EWM keeps the change sets themselves, with their own work item links.
 
-Verified so far on EWM 7.2:
-- the toolkit's login, through `tools/register-git-repo` and the compatibility preload;
-- the server's answer to a user without the license and permission (`CRRTC8821E`);
-- the toolkit's Node.js Git server running with the preload.
+Verified on EWM 7.2 with the Mortgage sample's application repository (branches `master` and `test`, two tags):
+- **Registration:** `tools/register-git-repo` registered the repository in "JKE Banking (Change Management)" without process.
+- **Server:** the toolkit's Node.js Git server ran on the same machine with the compatibility preload. Its hooks were installed by hand (below) and authenticated against EWM.
+- **Push:** `tools/push-history` pushed both branches and the tags. The pre-receive hook had EWM validate every commit, and the post-receive hook reported every commit to EWM. The server's branches and tags equal the local ones.
+- **No links in this test:** the Mortgage change sets reference no work items, so the hooks reported "no links to create".
+- **Errors on the way, in order:**
+  - `CRRTC8821E`: license or Repository Registration permission missing;
+  - `CRRTC8814E`: Git requests not authorized by the pushing user;
+  - `CRRTC8822E`: Git Push permission missing.
 
-Not verified yet: a completed registration and a push with links. That needs a Git server with the toolkit's hooks or a webhook, and permission to register Git repositories in the project area. `tools/push-history` was tested against a local bare repository whose hook counted the commits of each push.
+On macOS, the toolkit's `tools/install/configure.sh` needs GNU `getopt` and fails with the system one. Its effect can be applied by hand:
+- `git config rtc.repokey <key>` and `git config rtc.repourl <EWM URI>` in the bare repository;
+- copy `server/hooks/examples/pre-receive` and `post-receive` into its `hooks/` folder, set `NODE_EXECUTABLE`, `RTC_GIT_SERVER_TOOLKIT_PATH` and `RTC_GIT_SERVER_TRACE_LEVEL` above the `#@@...@@` markers, and make them executable.
+
+The toolkit's Node.js server serves only repositories directly under its root (`/git/<name>.git`).
+
+Not verified yet: a link created from a migrated commit that references a work item. That needs a Git server with the toolkit's hooks or a webhook, and permission to register Git repositories in the project area. `tools/push-history` was tested against a local bare repository whose hook counted the commits of each push.
