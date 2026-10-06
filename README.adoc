@@ -99,7 +99,7 @@ The Git repository is the sandbox itself. Push it when the migration is done:
 ----
 git -C sandbox remote add origin <url>
 git -C sandbox push origin --all && git -C sandbox push origin --tags
-git -C sandbox lfs push --all origin    # only with lfs.* enabled
+git -C sandbox lfs push --all origin    # only with lfs.* enabled (needs git-lfs)
 ----
 
 Before migrating, `-L` lists the baselines and change sets without changing anything.

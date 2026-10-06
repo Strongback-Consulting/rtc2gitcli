@@ -37,3 +37,20 @@ Checks:
 ## Resetting the target for another run
 
 Unload every sandbox that loaded the workspaces (`scm unload -r <nick> --all -N`). Then reset the target: `scm remove component -N <target> <components...>`, then add the components again at their Initial Baselines.
+
+## Git LFS
+
+Verified on EWM 7.2 with git-lfs 3.8. The JKE Banking Integration Stream was migrated a second time with `lfs.patterns=*.jar` and `lfs.threshold=100k`:
+
+- **What went to LFS:** 20 files, the 18 jars by pattern and two 307 KB images by size. `git lfs fsck` finds every object.
+- **Status:** with git-lfs's filters enabled (`git lfs install --local`), `git status` is clean.
+- **Every commit matches the migration without LFS:**
+  - same commit order, authors, dates and messages; only the initial commit's date differs, as it records when the run happened;
+  - same paths and modes;
+  - every pointer's `sha256` and size match the content committed without LFS;
+  - the tags sit on the same commits.
+- **Round trip:**
+  - Push to a bare repository through a `file://` URL; git-lfs does not upload to a plain path.
+  - Clone it, then run `git lfs install --local && git lfs pull`, because a clone made without a global `git lfs install` holds only pointers.
+  - The checkout is byte-identical to the migration without LFS, at HEAD and at the tags.
+- **`ewm2zbuilder layout`:** copies the objects; `git lfs fsck` and `git lfs checkout` succeed in its output.
