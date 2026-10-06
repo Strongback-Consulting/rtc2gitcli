@@ -10,6 +10,7 @@ import java.util.TreeMap;
 import java.util.TreeSet;
 
 import to.rtc.cli.migrate.FileProperties;
+import to.rtc.cli.migrate.zos.ZosMetadata;
 
 /**
  * Turns EWM file properties into <code>.gitattributes</code> lines, so that a checkout produces the same bytes as
@@ -19,6 +20,10 @@ import to.rtc.cli.migrate.FileProperties;
  * <li>LF: <code>text eol=lf</code>, CRLF: <code>text eol=crlf</code>, Platform: <code>text</code></li>
  * <li>content type other than <code>text/*</code>: <code>binary</code></li>
  * <li>optionally a non UTF-8 encoding: <code>working-tree-encoding=...</code></li>
+ * <li>z/OS members (text files with a language definition or in a zFolder):
+ * <code>zos-working-tree-encoding=&lt;code page&gt; git-encoding=utf-8</code>, with the member's own
+ * <code>mvsCodePage</code> or the configured default. Git on z/OS converts them to EBCDIC on checkout; other Git
+ * clients ignore these attributes.</li>
  * </ul>
  * Each folder gets a single <code>/folder/**</code> line with its most common attributes plus its exceptions.
  */
@@ -27,12 +32,22 @@ final class GitattributesGenerator {
 	static final String END = "# <<< generated from EWM file properties";
 
 	private final boolean workingTreeEncoding;
+	private final String zosCodePage;
 
-	GitattributesGenerator(boolean workingTreeEncoding) {
+	/**
+	 * @param zosCodePage
+	 *            default code page of z/OS members, <code>null</code> to write no z/OS encodings
+	 */
+	GitattributesGenerator(boolean workingTreeEncoding, String zosCodePage) {
 		this.workingTreeEncoding = workingTreeEncoding;
+		this.zosCodePage = zosCodePage;
 	}
 
 	String attributesFor(FileProperties file) {
+		return attributesFor(file, false);
+	}
+
+	String attributesFor(FileProperties file, boolean zosMember) {
 		String contentType = file.getContentType();
 		if (contentType != null && !contentType.toLowerCase(Locale.ROOT).startsWith("text/")) {
 			return "binary";
@@ -49,11 +64,16 @@ final class GitattributesGenerator {
 			attributes = "text";
 			break;
 		default:
-			return "-text";
+			attributes = "-text";
 		}
 		String encoding = file.getEncoding();
-		if (workingTreeEncoding && encoding != null && !isUtf8Compatible(encoding)) {
+		if (workingTreeEncoding && !attributes.equals("-text") && encoding != null && !isUtf8Compatible(encoding)) {
 			attributes += " working-tree-encoding=" + encoding;
+		}
+		// independent of git's text handling: a member stored without line delimiter conversion is still text
+		if (zosMember && zosCodePage != null) {
+			attributes += " zos-working-tree-encoding=" + ZosMetadata.codePage(file, zosCodePage)
+					+ " git-encoding=utf-8";
 		}
 		return attributes;
 	}
@@ -65,9 +85,12 @@ final class GitattributesGenerator {
 
 	List<String> generate(Collection<FileProperties> items) {
 		Node root = new Node();
+		Set<String> zFolders = zosCodePage == null ? java.util.Collections.<String> emptySet()
+				: ZosMetadata.zFolders(items);
 		for (FileProperties item : items) {
 			if (!item.isFolder()) {
-				root.add(item.getPath().split("/"), 0, attributesFor(item));
+				root.add(item.getPath().split("/"), 0,
+						attributesFor(item, zosCodePage != null && ZosMetadata.isMember(item, zFolders)));
 			}
 		}
 		List<String> lines = new ArrayList<String>();

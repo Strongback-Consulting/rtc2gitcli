@@ -23,6 +23,7 @@ import to.rtc.cli.migrate.command.RtcCommands;
 import to.rtc.cli.migrate.command.RtcConnection;
 import to.rtc.cli.migrate.ewm.EwmChangeSetDetails;
 import to.rtc.cli.migrate.ewm.WorkspaceProvisioner;
+import to.rtc.cli.migrate.zos.SystemDefinitions;
 
 import com.ibm.team.filesystem.cli.client.AbstractSubcommand;
 import com.ibm.team.filesystem.cli.core.internal.ScmCommandLineArgument;
@@ -223,6 +224,7 @@ public abstract class MigrateTo extends AbstractSubcommand implements ISubcomman
 
 			output.writeLine("Start migration of tags.");
 			// file properties of what is already in the sandbox, so that the initial commit gets them too
+			migrator.setSystemDefinitions(SystemDefinitions.create(repo));
 			ChangeSetDetails details = new EwmChangeSetDetails(repo, destinationWs);
 			Collection<FileProperties> initialFiles = details.readAll();
 			output.writeLine("Read the properties of " + initialFiles.size() + " files and folders of the target workspace");

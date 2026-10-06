@@ -12,7 +12,7 @@ import to.rtc.cli.migrate.FileProperties.LineDelimiter;
 
 public class GitattributesGeneratorTest {
 
-	private final GitattributesGenerator generator = new GitattributesGenerator(false);
+	private final GitattributesGenerator generator = new GitattributesGenerator(false, null);
 
 	@Test
 	public void testAttributesFromLineDelimiter() {
@@ -31,7 +31,7 @@ public class GitattributesGeneratorTest {
 
 	@Test
 	public void testWorkingTreeEncodingOnlyWhenEnabledAndNotUtf8() {
-		GitattributesGenerator withEncoding = new GitattributesGenerator(true);
+		GitattributesGenerator withEncoding = new GitattributesGenerator(true, null);
 		assertEquals("text eol=lf working-tree-encoding=IBM-1047",
 				withEncoding.attributesFor(file("a", LineDelimiter.LF, "text/plain", "IBM-1047")));
 		assertEquals("text eol=lf", withEncoding.attributesFor(file("a", LineDelimiter.LF, "text/plain", "utf-8")));
@@ -81,5 +81,33 @@ public class GitattributesGeneratorTest {
 	static FileProperties file(String path, LineDelimiter delimiter, String contentType, String encoding) {
 		return FileProperties.file("id-" + path, path, delimiter, contentType, encoding, false,
 				Collections.<String, String> emptyMap());
+	}
+
+	@Test
+	public void testZosMembersGetCodePage() {
+		GitattributesGenerator zos = new GitattributesGenerator(false, "IBM-1047");
+		java.util.Map<String, String> cobolFolder = Collections.singletonMap(
+				"team.enterprise.resource.definition", "_dsd");
+		java.util.Map<String, String> ownCodePage = new java.util.HashMap<String, String>();
+		ownCodePage.put("team.enterprise.language.definition", "_ld");
+		ownCodePage.put("mvsCodePage", "IBM-037");
+
+		assertEquals(Arrays.asList("* text eol=lf",
+				"/App/zOSsrc/** text eol=lf zos-working-tree-encoding=IBM-1047 git-encoding=utf-8",
+				"/App/zOSsrc/COBOL/B.cbl text eol=lf zos-working-tree-encoding=IBM-037 git-encoding=utf-8",
+				"/App/zOSsrc/COBOL/NODELIM.cbl -text zos-working-tree-encoding=IBM-1047 git-encoding=utf-8 !eol",
+				"/App/zOSsrc/COBOL/obj.bin binary !eol !git-encoding !zos-working-tree-encoding"),
+				zos.generate(Arrays.asList(file("App/.project", LineDelimiter.LF, "text/text", "UTF-8"),
+						file("App/zOSsrc/COBOL/A.cbl", LineDelimiter.LF, "text/text", "UTF-8"),
+						file("App/zOSsrc/COBOL/C.cbl", LineDelimiter.LF, "text/text", "UTF-8"),
+						FileProperties.file("b", "App/zOSsrc/COBOL/B.cbl", LineDelimiter.LF, "text/text", "UTF-8",
+								false, ownCodePage),
+						file("App/zOSsrc/COBOL/NODELIM.cbl", LineDelimiter.NONE, "text/text", "UTF-8"),
+						file("App/zOSsrc/COBOL/obj.bin", LineDelimiter.NONE, "application/octet-stream", null),
+						file("App/readme.txt", LineDelimiter.LF, "text/text", "UTF-8"),
+						FileProperties.folder("d", "App/zOSsrc/COBOL", cobolFolder))));
+		// without a code page: unchanged
+		assertEquals("text eol=lf", generator.attributesFor(
+				FileProperties.file("b", "x.cbl", LineDelimiter.LF, "text/text", "UTF-8", false, ownCodePage), true));
 	}
 }

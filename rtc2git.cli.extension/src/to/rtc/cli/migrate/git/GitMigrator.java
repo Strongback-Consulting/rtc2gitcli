@@ -5,6 +5,7 @@ import java.io.IOException;
 import java.nio.charset.Charset;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
@@ -59,6 +60,9 @@ import to.rtc.cli.migrate.Tag;
 import to.rtc.cli.migrate.util.CommitCommentTranslator;
 import to.rtc.cli.migrate.util.Files;
 import to.rtc.cli.migrate.util.JazzignoreTranslator;
+import to.rtc.cli.migrate.util.JsonWriter;
+import to.rtc.cli.migrate.zos.SystemDefinitions;
+import to.rtc.cli.migrate.zos.ZosMetadata;
 
 /**
  * Git implementation of a {@link Migrator}.
@@ -103,6 +107,9 @@ public final class GitMigrator implements Migrator {
 	private String lastCommitId;
 	static final String KEEP_FILE = ".gitkeep";
 	private boolean keepEmptyFolders;
+	private String zosCodePage;
+	private boolean zosMetadata;
+	private SystemDefinitions systemDefinitions = SystemDefinitions.unavailable("not set by the migration");
 	// index-only placeholders for folders that are empty in EWM (never written to the sandbox)
 	private final Set<String> keepFiles = new TreeSet<String>();
 	// UUIDs of the EWM baselines that already have a tag (read from the tag messages)
@@ -545,8 +552,11 @@ public final class GitMigrator implements Migrator {
 		forceAddIgnored = Boolean.parseBoolean(props.getProperty("commit.force.add.ignored", "true"));
 		attributesFromEwm = Boolean.parseBoolean(props.getProperty("gitattributes.from.ewm", "true"));
 		keepEmptyFolders = Boolean.parseBoolean(props.getProperty("keep.empty.folders", "false"));
+		String codePage = props.getProperty("zos.codepage", ZosMetadata.DEFAULT_CODE_PAGE).trim();
+		zosCodePage = codePage.isEmpty() || codePage.equalsIgnoreCase("none") ? null : codePage;
+		zosMetadata = Boolean.parseBoolean(props.getProperty("zos.metadata", "true"));
 		attributesGenerator = new GitattributesGenerator(
-				Boolean.parseBoolean(props.getProperty("gitattributes.working-tree-encoding", "false")));
+				Boolean.parseBoolean(props.getProperty("gitattributes.working-tree-encoding", "false")), zosCodePage);
 		intentionalIgnores = null;
 		parseElements(props.getProperty("ignore.file.extensions", ""), ignoredFileExtensions);
 		// update window cache config
@@ -618,7 +628,7 @@ public final class GitMigrator implements Migrator {
 			initRootGitignore(sandboxRootDirectory);
 			initRootGitattributes(sandboxRootDirectory);
 			if (propertiesBeforeInit != null) {
-				writeGeneratedAttributes(propertiesBeforeInit);
+				writeGeneratedFiles(propertiesBeforeInit);
 				propertiesBeforeInit = null;
 			}
 			initConfig();
@@ -691,7 +701,7 @@ public final class GitMigrator implements Migrator {
 		if (keepEmptyFolders) {
 			updateKeepFiles(files);
 		}
-		if (!attributesFromEwm) {
+		if (!attributesFromEwm && !zosMetadata) {
 			return;
 		}
 		if (rootDir == null) {
@@ -699,10 +709,46 @@ public final class GitMigrator implements Migrator {
 			return;
 		}
 		try {
-			writeGeneratedAttributes(files);
+			writeGeneratedFiles(files);
 		} catch (IOException e) {
-			throw new RuntimeException("Unable to write .gitattributes", e);
+			throw new RuntimeException("Unable to write the files generated from EWM properties", e);
 		}
+	}
+
+	@Override
+	public void setSystemDefinitions(SystemDefinitions definitions) {
+		systemDefinitions = definitions;
+	}
+
+	private void writeGeneratedFiles(Collection<FileProperties> files) throws IOException {
+		if (attributesFromEwm) {
+			writeGeneratedAttributes(files);
+		}
+		if (zosMetadata) {
+			writeZosMetadata(files);
+		}
+	}
+
+	/**
+	 * Writes <code>.ewm/zos-metadata.json</code> when it changed; removes it when no file has z/OS metadata (any
+	 * more).
+	 */
+	private void writeZosMetadata(Collection<FileProperties> files) throws IOException {
+		File file = new File(rootDir, ZosMetadata.PATH);
+		Map<String, Object> document = ZosMetadata.build(files, systemDefinitions,
+				zosCodePage == null ? ZosMetadata.DEFAULT_CODE_PAGE : zosCodePage);
+		if (document == null) {
+			if (file.exists()) {
+				java.nio.file.Files.delete(file.toPath());
+			}
+			return;
+		}
+		byte[] content = JsonWriter.toString(document).getBytes(StandardCharsets.UTF_8);
+		if (file.exists() && Arrays.equals(content, java.nio.file.Files.readAllBytes(file.toPath()))) {
+			return;
+		}
+		file.getParentFile().mkdirs();
+		java.nio.file.Files.write(file.toPath(), content);
 	}
 
 	/**

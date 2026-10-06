@@ -4,6 +4,8 @@ import java.io.File;
 import java.util.Collection;
 import java.util.Map;
 
+import to.rtc.cli.migrate.zos.SystemDefinitions;
+
 /**
  * @author florian.buehlmann
  * @author patrick.reinhart
@@ -30,6 +32,13 @@ public interface Migrator {
 	void intermediateCleanup();
 
 	boolean needsIntermediateCleanup();
+
+	/**
+	 * Resolves the z/OS language and data set definitions referenced by file properties; called before
+	 * {@link #init(File)}.
+	 */
+	default void setSystemDefinitions(SystemDefinitions definitions) {
+	}
 
 	/**
 	 * Tells whether the change set was already migrated by an earlier run.

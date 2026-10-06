@@ -21,9 +21,18 @@ public final class JsonWriter {
 
 	public static void write(File file, Object value) throws IOException {
 		try (Writer writer = new OutputStreamWriter(Files.newOutputStream(file.toPath()), StandardCharsets.UTF_8)) {
-			writeValue(writer, value, "");
-			writer.write('\n');
+			writer.write(toString(value));
 		}
+	}
+
+	public static String toString(Object value) {
+		java.io.StringWriter writer = new java.io.StringWriter();
+		try {
+			writeValue(writer, value, "");
+		} catch (IOException e) {
+			throw new IllegalStateException(e); // cannot happen with a StringWriter
+		}
+		return writer.append('\n').toString();
 	}
 
 	public static void writeValue(Writer writer, Object value, String indent) throws IOException {
