@@ -1,0 +1,56 @@
+#!/bin/sh
+# Pushes a migrated repository in steps of a few commits per branch, so that every push event a webhook
+# receives lists all of its commits. GitLab lists at most 20 commits in a push event and GitHub at most
+# 2048. EWM can only link work items to the commits it is told about (see docs/ewm-git-integration.md).
+#
+# Usage: tools/push-history [-n <commits per push>] <repository> <remote> [<branch> ...]
+#
+#   -n  commits per push (default 20)
+#   <repository>  the migrated repository (a sandbox or the application repository from ewm2zbuilder layout)
+#   <remote>      name of a configured remote (git remote add <name> <url>)
+#   <branch>      branches to push, oldest stream first (default: all local branches, the current one first)
+#
+# Tags are pushed at the end. Branches that already exist on the remote continue from where they are.
+# Git LFS content is uploaded by git-lfs's pre-push hook when git-lfs is set up in the repository.
+set -eu
+
+STEP=20
+while getopts n: opt; do
+  case $opt in
+    n) STEP=$OPTARG ;;
+    *) sed -n '2,15p' "$0" >&2; exit 2 ;;
+  esac
+done
+shift $((OPTIND - 1))
+[ $# -ge 2 ] || { sed -n '2,15p' "$0" >&2; exit 2; }
+REPO=$1 REMOTE=$2
+shift 2
+case $STEP in ''|*[!0-9]*|0) echo "-n needs a positive number" >&2; exit 2 ;; esac
+git -C "$REPO" remote get-url "$REMOTE" >/dev/null
+if [ $# -eq 0 ]; then
+  CURRENT=$(git -C "$REPO" symbolic-ref --short HEAD)
+  set -- "$CURRENT" $(git -C "$REPO" for-each-ref --format='%(refname:short)' refs/heads | grep -vx "$CURRENT" || true)
+fi
+
+for BRANCH in "$@"; do
+  git -C "$REPO" fetch -q "$REMOTE"
+  # first-parent commits the remote does not have yet, oldest first
+  COMMITS=$(git -C "$REPO" rev-list --reverse --first-parent "$BRANCH" --not --remotes="$REMOTE")
+  TOTAL=$(printf '%s' "$COMMITS" | grep -c . || true)
+  if [ "$TOTAL" -eq 0 ]; then
+    # a branch that starts at a commit the remote already has: create it there
+    git -C "$REPO" push -q "$REMOTE" "$BRANCH:refs/heads/$BRANCH"
+    echo "$BRANCH: nothing new"
+    continue
+  fi
+  COUNT=0
+  for COMMIT in $COMMITS; do
+    COUNT=$((COUNT + 1))
+    if [ $((COUNT % STEP)) -eq 0 ] || [ "$COUNT" -eq "$TOTAL" ]; then
+      git -C "$REPO" push -q "$REMOTE" "$COMMIT:refs/heads/$BRANCH"
+      echo "$BRANCH: $COUNT/$TOTAL commits"
+    fi
+  done
+done
+git -C "$REPO" push -q "$REMOTE" --tags
+echo "tags pushed"
