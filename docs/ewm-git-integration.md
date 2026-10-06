@@ -38,6 +38,18 @@ tools/register-git-repo -k <Git Server Toolkit> -r https://ewm.example.com:9443/
   ```
 
 - **`-x`:** prints the toolkit command without running it.
+- **`-i`:** skips the check of EWM's TLS certificate (test servers with a self-signed certificate).
+
+Requirements found on a live EWM 7.2 server:
+- **Project area:** `-p` takes a *project* area. A stream's owner shown by `scm list streams` can be a team area: use its project area here, and make the team area the owner afterwards (`UpdateGitRepository.js ... owner:'<project area>/<team area>'`).
+- **License and permission:** the registering user needs one of these licenses, plus the *Repository Registration* permission in the project or team area that controls the repository (error `CRRTC8821E` otherwise):
+  - IBM Engineering Lifecycle Management solution – Practitioner;
+  - IBM Engineering Workflow Management – Developer;
+  - IBM Engineering Workflow Management – Developer for IBM Enterprise Platforms.
+- **Node.js compatibility:** the toolkit's 7.2 scripts do not run on current Node.js as shipped. `tools/register-git-repo` preloads `tools/lib/toolkit-node-compat.js`, which changes no IBM file:
+  - it restores `util.log`, removed in Node.js 23;
+  - it drops the empty `cookie` header the toolkit sends after its anonymous pre-login. EWM 7.2 with form login sets no cookie there, and Node.js rejects the header.
+- **The toolkit's Node.js Git server needs the same preload:** `NODE_OPTIONS="--require <rtc2gitcli>/tools/lib/toolkit-node-compat.js" node main.js`. Its hook processes inherit it.
 
 The registration shows the repository key and URL. The Git server side then needs one of these:
 - **Toolkit hooks:** set them up for the repository, as described in the toolkit's `server/README` and `server/hooks/examples`.
@@ -76,4 +88,9 @@ node UpdateGitRepository.js hostUrl:"<uri>" userId:"<user>" prompt:"true" search
 - `node GetGitRepository.js hostUrl:"<uri>" userId:"<user>" prompt:"true" searchUrl:"<clone URL>" showDetails:"true"` shows the registration.
 - The `EWM-ChangeSet` trailer of each commit names the change set it came from. EWM keeps the change sets themselves, with their own work item links.
 
-Not verified yet: an actual registration and push on a live server. That needs a Git server with the toolkit's hooks or a webhook, and permission to register Git repositories in the project area. `tools/push-history` was tested against a local bare repository whose hook counted the commits of each push.
+Verified so far on EWM 7.2:
+- the toolkit's login, through `tools/register-git-repo` and the compatibility preload;
+- the server's answer to a user without the license and permission (`CRRTC8821E`);
+- the toolkit's Node.js Git server running with the preload.
+
+Not verified yet: a completed registration and a push with links. That needs a Git server with the toolkit's hooks or a webhook, and permission to register Git repositories in the project area. `tools/push-history` was tested against a local bare repository whose hook counted the commits of each push.
