@@ -53,7 +53,7 @@ uv run ewm2zbuilder layout <mirror> <target> [--language-map out/language-map.ya
   - **What gets folded.** `variants.py` detects families of CICS/DB2/link-edit variants of one compiler: same language code, same name without CICS/DB2/SQL/link/batch words, same compiler, one definition per feature combination. Definitions with identical translators are aliases of one member; differing ties and empty names are not folded. A `--fold-map` (`fold-map.example.yaml`) adds folds and wins for every definition it names; the rest of a detected family is still folded under its plainest member's name.
   - **How a fold is built** (`emit._Converter.fold`, `consolidate.py`, both ported from the `estimation` project on 2026-10-08):
     - steps are guarded by minimal conditions over the flags (`eval`) and the EWM properties of step conditions (`exists`/`notExists`, e.g. an alternate-compiler switch);
-    - same-role steps (same program or REXX member; `role_buckets` keeps a precompile and a compile of one program apart) become one step, with `select` variables for differing `parm`/`command` and DD conditions merged per DD block;
+    - same-role steps (same program or REXX member; `role_buckets` keeps a precompile and a compile of one program apart) become one step, with `select` variables for differing `parm`/`command` and DD conditions merged per DD block. A step joins a merged step only if every variant keeps its own step order; where variants run two steps in opposite orders, the later one stays apart;
     - `verify` then expands the merged and the unmerged task for every flag/property combination; any difference falls back to the unmerged steps with a `consolidate` note;
     - `unify_temp_space` (fold map only, opt-in) deliberately gives temp work DDs the largest space of any variant.
   - Flags are declared in the task with their defaults (`IS_CICS`/`IS_SQL` false, `doLinkEdit` true); `dbb-app.yaml` sets the other value per file. A condition may name combinations no EWM variant has: the merge only treats combinations as "don't care" where the merged step cannot run.
@@ -71,7 +71,7 @@ uv run ewm2zbuilder layout <mirror> <target> [--language-map out/language-map.ya
   - The rewrite is deterministic: without renames it reproduces the mirror's commit IDs exactly.
   - Every branch of the mirror is copied. The current branch is renamed to `--branch`, and shared history is rewritten once. `dbb-app.yaml` is built from each branch tip's metadata.
 
-Neither the IBM zBuilder schema nor any client export is committed. Tests find them through `EWM2ZBUILDER_SCHEMA` and `EWM2ZBUILDER_EXPORT`, or in the git-ignored `ewm2zbuilder/schema/` and `ewm2zbuilder/local/` folders, and skip when they are absent. This repo is public: never commit client system definitions, data set names, or generated output.
+Neither the IBM zBuilder schema nor any client export is committed. Tests find them through `EWM2ZBUILDER_SCHEMA` and `EWM2ZBUILDER_EXPORT`, or in the git-ignored `ewm2zbuilder/schema/` and `ewm2zbuilder/local/` folders, and skip when they are absent. A client fold map belongs in `ewm2zbuilder/local/` as well. This repo is public: never commit client system definitions, data set names, or generated output.
 
 End-to-end testing against a live EWM server is described in `docs/e2e-testing.md`.
 

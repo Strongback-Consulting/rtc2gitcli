@@ -690,6 +690,32 @@ def _merge_group(its, on_all, step_cond, space, universe, taken, reserved):
     return [with_condition(step, step_cond)], new_vars
 
 
+def _slot_order(slots: list[list[int]], slot_of: dict[int, int], seqs: list[list[int]]) -> list[int] | None:
+    """The slots in an order that keeps every variant's step order (None if there is none).
+
+    Only the steps placed so far (`slot_of`) count: a variant's order of those is implied by its full order.
+    """
+    after: dict[int, set[int]] = {s: set() for s in range(len(slots))}
+    indeg = {s: 0 for s in range(len(slots))}
+    for seq in seqs:
+        placed = [slot_of[i] for i in seq if i in slot_of]
+        for sa, sb in zip(placed, placed[1:]):
+            if sa != sb and sb not in after[sa]:
+                after[sa].add(sb)
+                indeg[sb] += 1
+    ready = sorted((s for s, n in indeg.items() if n == 0), key=lambda x: min(slots[x]))
+    order: list[int] = []
+    while ready:
+        s = ready.pop(0)
+        order.append(s)
+        for nxt in sorted(after[s]):
+            indeg[nxt] -= 1
+            if indeg[nxt] == 0:
+                ready.append(nxt)
+        ready.sort(key=lambda x: min(slots[x]))
+    return order if len(order) == len(slots) else None
+
+
 def consolidate(items: list[Item], seqs: list[list[int]], space: Space, reserved: set[str],
                 notes: list[str] | None = None) -> Result:
     """Merge `items` (in a valid run order) into fewer steps.
@@ -706,7 +732,10 @@ def consolidate(items: list[Item], seqs: list[list[int]], space: Space, reserved
     for i, it in enumerate(items):
         key = keys[i]
         for s in buckets.get(key, []):
-            if all(not (items[j].atoms & it.atoms) for j in slots[s]):
+            # a step joins the first slot of its role that no variant runs twice and that keeps every
+            # variant's step order (variants that run two roles in opposite orders: the later one stays apart)
+            if all(not (items[j].atoms & it.atoms) for j in slots[s]) \
+                    and _slot_order(slots, {**slot_of, i: s}, seqs) is not None:
                 slots[s].append(i)
                 slot_of[i] = s
                 break
@@ -714,26 +743,8 @@ def consolidate(items: list[Item], seqs: list[list[int]], space: Space, reserved
             slots.append([i])
             slot_of[i] = len(slots) - 1
             buckets.setdefault(key, []).append(len(slots) - 1)
-    # order the slots so that every variant's own step order is kept
-    after: dict[int, set[int]] = {s: set() for s in range(len(slots))}
-    indeg = {s: 0 for s in range(len(slots))}
-    for seq in seqs:
-        for a, b in zip(seq, seq[1:]):
-            sa, sb = slot_of[a], slot_of[b]
-            if sa != sb and sb not in after[sa]:
-                after[sa].add(sb)
-                indeg[sb] += 1
-    ready = sorted((s for s, n in indeg.items() if n == 0), key=lambda x: min(slots[x]))
-    order: list[int] = []
-    while ready:
-        s = ready.pop(0)
-        order.append(s)
-        for nxt in sorted(after[s]):
-            indeg[nxt] -= 1
-            if indeg[nxt] == 0:
-                ready.append(nxt)
-        ready.sort(key=lambda x: min(slots[x]))
-    if len(order) != len(slots):
+    order = _slot_order(slots, slot_of, seqs)
+    if order is None:  # cannot happen: a step in a slot of its own never adds a cycle
         raise ConsolidationError("merged steps would need to run in conflicting orders")
     taken: set[str] = set()
     steps: list[dict] = []
