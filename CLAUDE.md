@@ -44,15 +44,22 @@ export SCMTOOLS_HOME=<dest>/scmtools                  # folder containing eclips
 cd ewm2zbuilder
 uv run --group dev pytest -q                                   # all tests
 uv run --group dev pytest -q tests/test_convert.py::test_emit_step_shape
-uv run ewm2zbuilder <export.xml> -o out --schema <schema.json> [--sources-map map.yaml] [--no-variants]
+uv run ewm2zbuilder <export.xml> -o out --schema <schema.json> [--fold-map folds.yaml] [--sources-map map.yaml] [--no-variants] [--no-consolidate]
 uv run ewm2zbuilder app <repo>/.ewm/zos-metadata.json --language-map out/language-map.yaml -o <repo>/dbb-app.yaml --schema <schema.json>
 uv run ewm2zbuilder layout <mirror> <target> [--language-map out/language-map.yaml]
 ```
 
-- **Shared configuration.** The conversion writes `Languages.yaml` plus one language-task YAML per language definition. Exception: `variants.py` merges language definitions that are CICS/DB2/link-edit variants of one compiler into one task (same language code, same name without CICS/DB2/SQL/link words, same compiler, one definition per feature combination).
-  - Steps not every variant runs get `${IS_CICS}`/`${IS_SQL}`/`${doLinkEdit}` conditions (defaults false, false, true; `dbb-app.yaml` sets the other value per file).
-  - Steps running the same program become one step: options come from a `select` variable, and DDs only some variants have get conditions.
-  - Near misses are listed in `conversion-report.txt`.
+- **Shared configuration.** The conversion writes `Languages.yaml` plus one language-task YAML per language definition, except for folded tasks: several language definitions in one task, keyed on flag variables.
+  - **What gets folded.** `variants.py` detects families of CICS/DB2/link-edit variants of one compiler: same language code, same name without CICS/DB2/SQL/link/batch words, same compiler, one definition per feature combination. Definitions with identical translators are aliases of one member; differing ties and empty names are not folded. A `--fold-map` (`fold-map.example.yaml`) adds folds and wins for every definition it names; the rest of a detected family is still folded under its plainest member's name.
+  - **How a fold is built** (`emit._Converter.fold`, `consolidate.py`, both ported from the `estimation` project on 2026-10-08):
+    - steps are guarded by minimal conditions over the flags (`eval`) and the EWM properties of step conditions (`exists`/`notExists`, e.g. an alternate-compiler switch);
+    - same-role steps (same program or REXX member; `role_buckets` keeps a precompile and a compile of one program apart) become one step, with `select` variables for differing `parm`/`command` and DD conditions merged per DD block;
+    - `verify` then expands the merged and the unmerged task for every flag/property combination; any difference falls back to the unmerged steps with a `consolidate` note;
+    - `unify_temp_space` (fold map only, opt-in) deliberately gives temp work DDs the largest space of any variant.
+  - Flags are declared in the task with their defaults (`IS_CICS`/`IS_SQL` false, `doLinkEdit` true); `dbb-app.yaml` sets the other value per file. A condition may name combinations no EWM variant has: the merge only treats combinations as "don't care" where the merged step cannot run.
+  - Other mappings in `emit.py`: a kept temp data set is handed to later steps as `&&NAME`; every published DD of a step gets its own log file; a translator's program library goes first into its TASKLIB unless the concatenation already holds that data set (DSNs compared, not definition names).
+  - `conversion-report.txt` lists every folded task (detected or from the fold map, with aliases) and every near miss.
+  - Tests: `tests/test_consolidate.py` (engine, synthetic) and the generic real-export tests in `tests/test_convert.py`: every folded task equals its unmerged form, every member runs what its own definition runs.
 - **`language-map.yaml`** (not a zBuilder file) maps every language definition to its task, variant variables and task variables. It is the contract with `app`.
 - **`app`** (`app.py`) builds `dbb-app.yaml` from the metadata `migrate-to-git` commits into the repository.
   - `sources` use folder globs where a zFolder's members all belong to one task, and member paths otherwise (a per-file override).
