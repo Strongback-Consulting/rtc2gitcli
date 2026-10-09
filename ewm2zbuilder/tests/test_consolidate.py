@@ -238,6 +238,17 @@ def test_one_program_used_twice_in_a_variant_keeps_precompile_and_compile_apart(
     assert len(res.steps) == 2 and len(res.variables) == 1
 
 
+def test_steps_run_in_opposite_orders_merge_as_far_as_the_orders_allow():
+    # one variant builds the online module first, the other the batch module: merging both pairs of steps
+    # would need conflicting orders, so the first pair is merged and the second step of the other order stays apart
+    online, batch = _step("Online", [{"name": "SYSLIB", "dsn": "O"}], pgm="ON"), _step("Batch", [], pgm="BA")
+    items = _variant_items((online, False), (batch, False), (dict(batch), True), (dict(online), True))
+    res, problems = _merged(items, seqs=[[0, 1], [2, 3]])
+    assert problems == []
+    assert [(s["step"], s.get("condition")) for s in res.steps] == [
+        ("Online", "${IS_CICS} != true"), ("Batch", None), ("Online 2", "${IS_CICS}")]
+
+
 def test_role_buckets_only_refine_when_steps_of_a_role_overlap():
     items, _ = _precompile_and_compile_items()
     steps, atoms = [i.step for i in items], [i.atoms for i in items]
