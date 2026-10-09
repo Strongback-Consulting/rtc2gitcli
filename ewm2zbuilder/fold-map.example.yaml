@@ -1,0 +1,26 @@
+# Fold map for `ewm2zbuilder --fold-map` (and `tools/migrate-zos -f`): language definitions to fold
+# into one zBuilder language task. Variant families are also detected automatically; a fold here
+# wins for every language definition it names.
+#
+# Shape:  target task name:
+#           variants:           { EWM language definition name: { flag variable: true/false } }
+#           unify_temp_space:   [ DD name globs ]      (optional)
+#
+# variants: every variant must set the same flags. Steps are guarded by the flag values of the
+#   variants that run them, steps of the same role are merged, and the result is verified against
+#   the unmerged steps. The target name is free: it need not be an existing language definition.
+#
+# unify_temp_space: temporary work files with these DD names get one allocation across all variants,
+#   with the largest primary and secondary space any variant asks for. Only DDs that differ in nothing
+#   but space are changed. This deliberately departs from EWM's per-variant sizes.
+
+"Assembler and Link":
+  variants:
+    "Assembler and Link":       {IS_CICS: false}
+    "Assembler CICS and Link":  {IS_CICS: true}
+
+"C Compile and Link":
+  variants:
+    "C Batch Compile and Link": {IS_CICS: false}
+    "C CICS Compile and Link":  {IS_CICS: true}
+  unify_temp_space: ["SYSUT*"]

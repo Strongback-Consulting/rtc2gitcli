@@ -1,6 +1,6 @@
 """Command line.
 
-  ewm2zbuilder EXPORT.xml -o OUTDIR        system definitions -> shared zBuilder configuration
+  ewm2zbuilder EXPORT.xml -o OUTDIR [--fold-map F]   system definitions -> shared zBuilder configuration
   ewm2zbuilder app METADATA --language-map OUTDIR/language-map.yaml -o dbb-app.yaml
   ewm2zbuilder layout MIRROR TARGET [--language-map OUTDIR/language-map.yaml]
 """
@@ -15,7 +15,7 @@ from pathlib import Path
 
 import yaml
 
-from .emit import Output, emit_all
+from .emit import SCHEMA_VERSION, Output, emit_all
 from .parser import parse
 from .resolve import check
 
@@ -43,8 +43,9 @@ def write_report(path: Path, issues, out: Output, schema_errors: list[str]) -> N
     lines += [f"UNRESOLVED REFERENCES ({len(issues)})", *map(str, issues), ""]
     lines.append(f"VARIANT FAMILIES ({len(out.families)}): one task each, variants set per file in dbb-app.yaml")
     for fam in out.families:
-        lines.append(f"  {fam.task}")
+        lines.append(f"  {fam.task}" + ("  (fold map)" if fam.source == "fold map" else ""))
         lines += [f"    {m}: {vals}" for m, vals in fam.members.items()]
+        lines += [f"    {a}: same translators as {c}, uses this task" for a, c in fam.aliases.items()]
     lines.append("")
     groups = collections.defaultdict(list)
     for n in out.notes:
@@ -175,9 +176,18 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--check", action="store_true", help="parse and validate references only; write nothing")
     ap.add_argument("--sources-map", type=Path,
                     help="YAML mapping langdef name or language code (COB, ASM, ...) to a list of glob patterns")
+    ap.add_argument("--fold-map", type=Path,
+                    help="YAML: target task -> {variants: {langdef name: {flag: bool}}, unify_temp_space: [DD globs]}; "
+                         "folds those langdefs into one task, in addition to (and overriding) the detected families")
+    ap.add_argument("--no-consolidate", action="store_true",
+                    help="keep one step per EWM translator in folded tasks (default: merge same-role steps "
+                         "using conditions; the merge is verified equivalent or skipped)")
+    ap.add_argument("--schema-version", default=SCHEMA_VERSION,
+                    help="value for the emitted `version:` field (default %(default)s); the schema file "
+                         "itself does not state its version")
     ap.add_argument("--schema", type=Path, help="zBuilder JSON schema; validate every emitted file")
     ap.add_argument("--no-variants", action="store_true",
-                    help="one task per language definition; do not merge CICS/DB2 variants of one compiler")
+                    help="do not detect variant families; only the folds of --fold-map are merged")
     args = ap.parse_args(argv)
 
     sd = parse(args.export)
@@ -192,10 +202,19 @@ def main(argv: list[str] | None = None) -> int:
         return 1 if issues else 0
 
     sources_map = yaml.safe_load(args.sources_map.read_text()) if args.sources_map else None
+    folds = yaml.safe_load(args.fold_map.read_text()) if args.fold_map else None
+    try:
+        out = emit_all(sd, sources_map, folds, args.schema_version, not args.no_consolidate,
+                       variants=not args.no_variants)
+    except ValueError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    # a sources-map key is a langdef name, a language code, or the name of a folded task
+    known = set(sd.langdefs) | {ld.language_code for ld in sd.langdefs.values()} | {f.task for f in out.families}
     for key in sources_map or {}:
-        if key not in sd.langdefs and key not in {l.language_code for l in sd.langdefs.values()}:
-            print(f"warning: sources map key {key!r} matches no language definition or code", file=sys.stderr)
-    out = emit_all(sd, sources_map, variants=not args.no_variants)
+        if key not in known:
+            print(f"warning: sources map key {key!r} matches no language definition, language code or folded task",
+                  file=sys.stderr)
     schema_errors = validate(out, args.schema) if args.schema else []
 
     for fname, text in out.files.items():

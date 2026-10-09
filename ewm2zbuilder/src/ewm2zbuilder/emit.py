@@ -1,17 +1,23 @@
-"""Emit zBuilder YAML (schema v1.0.3) from a SystemDefinition.
+"""Emit zBuilder YAML (validated against buildConfigurationSchema*.json) from a SystemDefinition.
 
 Output mirrors the sample layout: `Languages.yaml` (includes, a `Languages`
 stage and global variables for system libraries) plus one language-task file
-per EWM language definition.
+per EWM language definition, except that variants of one compiler are folded
+into one task: the families `variants.py` detects, plus or overridden by the
+folds of a fold map. `consolidate.py` merges the folded steps and verifies the
+result; `Output.language_map` records which task and variant values every
+language definition ended up with (the contract with `app.py`).
 
 Mapping decisions (EWM -> zBuilder):
   * usage 0/1 datasets (non-VIO)  -> `${HLQ}.<dsName>` plus a `datasets` entry
   * usage 3 datasets              -> global variable in Languages.yaml, DD uses `${VAR}`
   * usage 2 / VIO datasets        -> temp DD (no `dsn`, BPXWDYN `new` options)
-  * program library of a translator -> TASKLIB DD (as in the IBM samples)
+  * program library of a translator -> TASKLIB DD (as in the IBM samples), or the first entry
+    of the translator's own TASKLIB/STEPLIB concatenation
   * allocation `propertyName`     -> `${PROP}` guarded by `condition: {exists: PROP}`
   * `input` DD with no dataset    -> the source member; a `copySrc` step is added
-  * `keep` (temp DD) -> `pass`;  `publish` -> `log`/`logEncoding`
+  * `keep` (temp DD) -> named temp + `pass`; a later translator using the same temp
+    dsdef reads it back (`dsn: &&NAME`, `shr`);  `publish` -> `log`/`logEncoding` (one file per DD)
   * `isset`/`not` conditions      -> `exists` / `notExists`
   * `commandMember` translators   -> `tso` step (flagged for review)
 Not generated (flagged in the report): `sources` unless a sources map is given,
@@ -21,6 +27,7 @@ Not generated (flagged in the report): `sources` unless a sources map is given,
 
 from __future__ import annotations
 
+import itertools
 import json
 import re
 import xml.etree.ElementTree as ET
@@ -28,7 +35,17 @@ from dataclasses import dataclass, field
 
 import yaml
 
-from .variants import FEATURE_DEFAULTS, Family, condition_for, find_families, merge_sequences, program_key
+from .consolidate import (
+    ConsolidationError,
+    Item,
+    Space,
+    consolidate as _consolidate,
+    merge_orders as _merge_orders,
+    unify_temp_space as _unify_temp_space,
+    verify as _verify,
+    with_condition as _with_condition,
+)
+from .variants import FEATURE_DEFAULTS, Family, find_families
 from .model import (
     CALL_COMMAND,
     USAGE_TEMP,
@@ -43,6 +60,7 @@ from .model import (
 
 SCHEMA_VERSION = "1.0.3"
 LOG_PATH = "${LOGS}/${STEP}-${FILE_NAME}.log"
+LOG_PATH_NAMED = "${{LOGS}}/${{STEP}}-{dd}-${{FILE_NAME}}.log"  # second and later published DDs of a step
 
 # Dataset that holds the source member being built, by EWM language code.
 SOURCE_DATASET = {
@@ -74,9 +92,9 @@ class Output:
     files: dict[str, str] = field(default_factory=dict)  # filename -> YAML text
     notes: list[Note] = field(default_factory=list)
     properties: list[str] = field(default_factory=list)  # build properties to define
-    # langdef name -> {"task": zBuilder task, "variables": {name: value}}; the contract with `ewm2zbuilder app`
+    # langdef name -> {"task", "variables", "taskVariables"}; the contract with `ewm2zbuilder app`
     language_map: dict[str, dict] = field(default_factory=dict)
-    families: list[Family] = field(default_factory=list)
+    families: list[Family] = field(default_factory=list)  # folded tasks, detected or from the fold map
 
 
 def slug(name: str) -> str:
@@ -102,9 +120,10 @@ def condition_obj(fragment: str):
     return None
 
 
-def _add_program_library(dds: list[dict], library: dict) -> None:
+def _add_program_library(dds: list[dict], library: dict, same_dataset=lambda a, b: a == b) -> None:
     """The translator's program library goes first in the task library: as its own TASKLIB DD, or, when the
-    translator allocates TASKLIB/STEPLIB itself, as the first entry of that concatenation (one DD per name)."""
+    translator allocates TASKLIB/STEPLIB itself and that concatenation does not already hold the library (under
+    any data set definition: `same_dataset` compares DSNs), as its first entry (one DD per name)."""
     index = next((i for i, dd in enumerate(dds) if dd.get("name") in ("TASKLIB", "STEPLIB")), None)
     if index is None:
         dds.insert(0, library)
@@ -112,27 +131,11 @@ def _add_program_library(dds: list[dict], library: dict) -> None:
     end = index + 1
     while end < len(dds) and "name" not in dds[end]:
         end += 1
-    if any(dd.get("dsn") == library["dsn"] for dd in dds[index:end]):
+    if any(same_dataset(dd.get("dsn"), library["dsn"]) for dd in dds[index:end]):
         return
     head = dds[index]
     dds[index] = {k: v for k, v in head.items() if k != "name"}
     dds.insert(index, {**library, "name": head["name"]})
-
-
-def _same_step(a, b) -> bool:
-    """Same program, settings and EWM condition; options and DDs may differ."""
-    def bare(step: dict) -> dict:
-        return {k: v for k, v in step.items() if k not in ("step", "parm", "dds")}
-    return bare(a[1]) == bare(b[1]) and a[2] == b[2]
-
-
-def combine_conditions(feature: str | None, ewm):
-    """A CICS/SQL condition (JEXL) and an EWM condition (exists/notExists) on the same step."""
-    if not feature:
-        return ewm or None
-    if not ewm:
-        return feature
-    return {**ewm, "eval": feature}
 
 
 def _space_options(d: DataSetDef) -> list[str]:
@@ -153,9 +156,26 @@ def _is_temp(d: DataSetDef) -> bool:
     return d.usage_type == USAGE_TEMP or (d.generic_unit or "").upper() == "VIO"
 
 
+@dataclass
+class _Flow:
+    """Temp datasets handed between the translators of one langdef.
+
+    `kept` = temp dsdefs a previous translator marked `keep`; `produced` = the ones this
+    translator keeps (added to `kept` once it is finished); `consumed` = the kept ones
+    this translator reads.
+    """
+
+    kept: set[str] = field(default_factory=set)
+    produced: set[str] = field(default_factory=set)
+    consumed: set[str] = field(default_factory=set)
+    published: int = 0  # DDs of this translator already given a log file
+
+
 class _Converter:
-    def __init__(self, sd: SystemDefinition, sources_map: dict[str, list[str]] | None):
+    def __init__(self, sd: SystemDefinition, sources_map: dict[str, list[str]] | None,
+                 consolidate: bool = True):
         self.sd = sd
+        self.consolidate = consolidate
         self.sources_map = sources_map or {}
         self.notes: list[Note] = []
         self.sysvars: dict[str, str] = {}  # usage-3 dsdef name -> variable name
@@ -176,6 +196,13 @@ class _Converter:
             self.sysvar_values[name] = d.ds_name
         return self.sysvars[d.name]
 
+    def same_dataset(self, a: str | None, b: str | None) -> bool:
+        """Whether two DD `dsn`s name the same data set (system library variables resolved)."""
+        def resolve(dsn):
+            m = re.fullmatch(r"\$\{(\w+)\}", dsn or "")
+            return self.sysvar_values.get(m.group(1), dsn) if m else dsn
+        return a is not None and resolve(a) == resolve(b)
+
     def text(self, s: str, ld: str, where: str, variables: dict[str, str] | None = None) -> str:
         for old, new in TEXT_SUBSTITUTIONS.items():
             s = s.replace(old, new)
@@ -188,7 +215,7 @@ class _Converter:
         return s
 
     # -- DDs ------------------------------------------------------------
-    def dd(self, a: Allocation, ld: LangDef, where: str, datasets: dict) -> dict:
+    def dd(self, a: Allocation, ld: LangDef, where: str, datasets: dict, flow: _Flow) -> dict:
         e: dict = {}
         if a.dd_name:
             e["name"] = a.dd_name
@@ -204,9 +231,23 @@ class _Converter:
                 e["dsn"] = f"${{TODO_{slug(a.ds_def)}}}"
                 e["options"] = "shr"
             elif _is_temp(d):
-                e["options"] = " ".join([*_space_options(d), *(["unit(vio)"] if d.generic_unit else []), "new"])
-                if a.keep:
+                tmp = d.ds_name.lstrip("&")  # EWM temp names look like "&&CICPUNCH"
+                new_opts = " ".join([*_space_options(d), *(["unit(vio)"] if d.generic_unit else []), "new"])
+                if a.keep:  # producer: a later translator reads this dataset (as in the IBM samples)
+                    if tmp:
+                        e["dsn"] = f"&&{tmp}"
+                    e["options"] = new_opts
                     e["pass"] = True
+                    flow.produced.add(d.name)
+                elif d.name in flow.kept:  # consumer: read what an earlier translator kept
+                    if tmp:
+                        e["dsn"] = f"&&{tmp}"
+                    else:
+                        self.note(ld.name, where, f"temp data set {d.name!r} is kept but unnamed; cannot be re-read")
+                    e["options"] = "shr"
+                    flow.consumed.add(d.name)
+                else:
+                    e["options"] = new_opts
             elif d.usage_type == USAGE_EXISTING:
                 if d.ds_name:
                     dsn = f"${{{self.sysvar(d)}}}"
@@ -236,7 +277,13 @@ class _Converter:
         if a.output:
             e["output"] = True
         if a.publish:
-            e["log"] = LOG_PATH
+            # Every published DD needs its own file, or the later ones overwrite the earlier. As in the
+            # IBM samples the first keeps the plain step log and the others carry their DD name.
+            flow.published += 1
+            if flow.published == 1:
+                e["log"] = LOG_PATH
+            else:
+                e["log"] = LOG_PATH_NAMED.format(dd=a.dd_name or f"DD{flow.published}")
             e["logEncoding"] = "${LOG_ENCODING}"
         if a.keep and "pass" not in e:
             self.note(ld.name, where, "`keep` on a non-temporary DD is not mapped")
@@ -246,7 +293,9 @@ class _Converter:
             self.note(ld.name, where, "`outputName`/`outputNameKind` not mapped")
         return e
 
-    def step(self, t: Translator, cond, ld: LangDef, datasets: dict) -> dict:
+    def step(self, t: Translator, cond, ld: LangDef, datasets: dict, kept: set[str]) -> tuple[dict, frozenset]:
+        """Build one step; returns (step, temp dsdefs it reads from earlier steps)."""
+        flow = _Flow(kept=kept)
         where = f"translator {t.name!r}"
         step: dict = {"step": t.name}
         d = self.sd.dsdefs.get(t.ds_def) if t.ds_def else None
@@ -275,23 +324,29 @@ class _Converter:
         for item in t.dds:
             if isinstance(item, Concatenation):
                 for i, a in enumerate(item.allocations):
-                    e = self.dd(a, ld, f"{where} DD {item.dd_name}", datasets)
+                    e = self.dd(a, ld, f"{where} DD {item.dd_name}", datasets, flow)
                     # Only the first entry carries the name; the rest concatenate to it.
                     e.pop("name", None)
                     dds.append({"name": item.dd_name, **e} if i == 0 else e)
             else:
-                dds.append(self.dd(item, ld, f"{where} DD {item.dd_name}", datasets))
+                dds.append(self.dd(item, ld, f"{where} DD {item.dd_name}", datasets, flow))
         if program_library:
-            _add_program_library(dds, program_library)
+            _add_program_library(dds, program_library, self.same_dataset)
         if dds:
-            step["dds"] = [FlowDict(d) for d in dds]
-        return step
+            step["dds"] = dds
+        kept |= flow.produced
+        return step, frozenset(flow.consumed)
 
     # -- language task --------------------------------------------------
-    def language(self, ld: LangDef) -> dict:
+    def _collect(self, ld: LangDef):
+        """Per-translator steps (condition not yet applied) for one langdef.
+
+        Returns (items, datasets, variables); each item is (key, step, ewm_cond).
+        """
         datasets: dict[str, tuple[DataSetDef | None, bool]] = {}
-        steps: list[dict] = []
+        items: list[tuple[tuple, dict, object]] = []
         variables: dict[str, str] = {}
+        kept: set[str] = set()
         for i, name in enumerate(ld.translators):
             t = self.sd.translators.get(name)
             if t is None:
@@ -302,141 +357,127 @@ class _Converter:
                 cond = condition_obj(ld.conditions[i])
                 if cond is None:
                     self.note(ld.name, f"translator {name!r}", f"unsupported condition {ld.conditions[i]!r}")
-            steps.append(self.step(t, cond, ld, datasets))
-            self.merge_variables(variables, t, ld.name)
-        return self.task(ld.name, ld, [ld.name, ld.language_code], steps, variables, datasets)
+            raw = ld.conditions[i] if i < len(ld.conditions) else ""
+            step, consumed = self.step(t, None, ld, datasets, kept)
+            # The same translator reading different kept datasets in two variants is two steps.
+            items.append(((name, raw, tuple(sorted(consumed))), step, cond))
+            for k, v in t.variables.items():
+                if k in variables and variables[k] != v:
+                    self.note(ld.name, f"variable {k}", f"conflicting values; keeping {variables[k]!r}")
+                variables.setdefault(k, v)
+        return items, datasets, variables
 
-    def merge_variables(self, variables: dict, t: Translator, ld_name: str) -> None:
-        for k, v in t.variables.items():
-            if k in variables and variables[k] != v:
-                self.note(ld_name, f"variable {k}", f"conflicting values; keeping {variables[k]!r}")
-            variables.setdefault(k, v)
-
-    def task(self, name: str, ld: LangDef, source_keys: list[str], steps: list[dict], variables: dict,
-             datasets: dict, extra_variables: list[dict] | None = None) -> dict:
+    def _task(self, name: str, code: str, steps: list[dict], datasets: dict, variables: dict,
+              extra_variables: list[dict] | None = None) -> dict:
         task: dict = {"language": name}
-        sources = next((self.sources_map[k] for k in source_keys if self.sources_map.get(k)), None)
+        sources = self.sources_map.get(name) or self.sources_map.get(code)
         if sources:
             task["sources"] = sources
         else:
             self.note(name, "sources", "no file patterns known; add via --sources-map")
-        all_variables = [*(extra_variables or []), *({"name": k, "value": v} for k, v in variables.items())]
-        if all_variables:
-            task["variables"] = all_variables
+        if variables or extra_variables:
+            task["variables"] = [{"name": k, "value": v} for k, v in variables.items()] + (extra_variables or [])
         if datasets:
             task["datasets"] = [
                 {"name": n, "options": self.create_options(d, member)} for n, (d, member) in datasets.items()
             ]
-        src_ds = f"${{HLQ}}.{SOURCE_DATASET.get(ld.language_code, DEFAULT_SOURCE_DATASET)}"
+        src_ds = f"${{HLQ}}.{SOURCE_DATASET.get(code, DEFAULT_SOURCE_DATASET)}"
         if src_ds in datasets and datasets[src_ds][0] is None:
             steps.insert(0, {
                 "step": "copySrc", "type": "copy", "source": "${FILE_PATH}",
                 "target": f"//'{src_ds}(${{MEMBER}})'",
             })
             self.note(name, "copySrc", "dependencyCopy (copybook/include search) not generated")
+        for st in steps:
+            if "dds" in st:
+                st["dds"] = [FlowDict(d) for d in st["dds"]]
         task["steps"] = steps
         return task
 
-    # -- variant families ----------------------------------------------
-    def family(self, fam: Family) -> dict:
-        """One task for all variants: steps not shared by every variant get a CICS/SQL condition."""
-        sd = self.sd
-        datasets: dict[str, tuple[DataSetDef | None, bool]] = {}
+    def language(self, ld: LangDef) -> dict:
+        items, datasets, variables = self._collect(ld)
+        steps = [_with_condition(step, cond) for _, step, cond in items]
+        return self._task(ld.name, ld.language_code, steps, datasets, variables)
+
+    def fold(self, target: str, variants: dict[str, dict[str, bool]], unify: list[str] | None = None) -> dict:
+        """Merge several langdefs into one task, guarding each step by variant flags.
+
+        `variants` maps langdef name -> {flag variable: bool}. A step present in
+        several variants is emitted once with the simplified union of their flags.
+        `unify` lists DD-name globs whose temp work files get one (the largest) space
+        across the variants (see consolidate.unify_temp_space).
+        """
+        flags = list(next(iter(variants.values())))
+        lds = [self.sd.langdefs[n] for n in variants]
+        collected = [self._collect(ld) for ld in lds]
+        info: dict[tuple, tuple[dict, object]] = {}
+        used_by: dict[tuple, list[tuple[bool, ...]]] = {}
+        seqs: list[list[tuple]] = []
+        datasets: dict = {}
         variables: dict[str, str] = {}
-        selects: list[dict] = []
-        steps: list[dict] = []
-        used: set[str] = set()
-        sequences = {}
-        for m in fam.members:
-            ld = sd.langdefs[m]
-            sequences[m] = [
-                (program_key(sd, n), " ".join((ld.conditions[i] if i < len(ld.conditions) else "").split()))
-                for i, n in enumerate(ld.translators)
-            ]
-        for slot in merge_sequences(sequences):
-            groups: dict[str, list[str]] = {}
-            for m, index in slot.items():
-                groups.setdefault(sd.langdefs[m].translators[index], []).append(m)
-            built = []
-            for tname, members in groups.items():
-                ld = sd.langdefs[members[0]]
-                index = slot[members[0]]
-                t = sd.translators.get(tname)
-                if t is None:
-                    self.note(fam.task, f"translator {tname!r}", "not defined in export; skipped")
-                    continue
-                ewm = condition_obj(ld.conditions[index]) if index < len(ld.conditions) else ""
-                if ewm is None:
-                    self.note(fam.task, f"translator {tname!r}", f"unsupported condition {ld.conditions[index]!r}")
-                built.append((members, self.step(t, None, ld, datasets), ewm))
-                self.merge_variables(variables, t, fam.task)
-            if not built:
-                continue
-            present = {fam.values(m) for m in slot}
-
-            if len(built) > 1 and all(_same_step(b, built[0]) for b in built):
-                built = [(list(slot), self.merge_steps(built, fam, selects), built[0][2])]
-            elif len(built) > 1:
-                self.note(fam.task, f"steps {[b[1]['step'] for b in built]}",
-                          "variants run different programs or settings here; emitted one step per variant")
-            for members, step, ewm in built:
-                feature = condition_for({fam.values(m) for m in members}, fam) if len(built) > 1 \
-                    else condition_for(present, fam)
-                steps.append(self.place(step, combine_conditions(feature, ewm), used))
-
-        base = sd.langdefs[fam.task]
-        flags = [{"name": f, "value": FEATURE_DEFAULTS[f]} for f in fam.features]
-        return self.task(fam.task, base, [fam.task, *fam.members, base.language_code], steps, variables,
-                         datasets, flags + selects)
+        for (name, assign), (items, ds, vs) in zip(variants.items(), collected):
+            seq = []
+            for key, step, cond in items:
+                info.setdefault(key, (step, cond))
+                used_by.setdefault(key, []).append(tuple(assign[f] for f in flags))
+                seq.append(key)
+            seqs.append(seq)
+            for k, v in ds.items():
+                datasets.setdefault(k, v)
+            for k, v in vs.items():
+                if k in variables and variables[k] != v:
+                    self.note(target, f"variable {k}", f"conflicting values across variants; keeping {variables[k]!r}")
+                variables.setdefault(k, v)
+        order = _merge_orders(seqs)
+        if order is None:
+            self.note(target, "fold", "variant step orders conflict; falling back to variant-by-variant order")
+            order = list(dict.fromkeys(k for seq in seqs for k in seq))
+        props = sorted({v for _, c in info.values() if isinstance(c, dict) for v in c.values()})
+        space = Space(tuple(flags), tuple(props))
+        atoms = {k: self._atoms(info[k][1], used_by[k], props) for k in order}
+        if unify:
+            for msg in _unify_temp_space([info[k][0] for k in order], unify, [atoms[k] for k in order]):
+                self.note(target, "unify_temp_space", msg)
+        conds = {k: _combine(info[k][1], _predicate(used_by[k], flags)) for k in order}
+        steps = [_with_condition(info[k][0], conds[k]) for k in order]
+        # the variant flags, with the value most files have; dbb-app.yaml sets the other value per file
+        extra_vars: list[dict] = [{"name": f, "value": FEATURE_DEFAULTS.get(f, False)} for f in flags]
+        if self.consolidate:
+            try:
+                steps, selects = self._consolidate(target, space, order, info, atoms, seqs, conds, steps, variables)
+                extra_vars += selects
+            except ConsolidationError as e:
+                self.note(target, "consolidate", f"steps left unconsolidated: {e}")
+        return self._task(target, lds[0].language_code, steps, datasets, variables, extra_vars)
 
     @staticmethod
-    def merge_steps(built: list, fam: Family, selects: list[dict]) -> dict:
-        """Variants run the same program here: one step, their options chosen per variant (`select`) and
-        their DDs aligned, each DD that not every variant has getting the condition of those that do."""
-        primary = next((b for b in built if fam.task in b[0]), built[0])
-        step = dict(primary[1])
-        # one select entry per distinct value, for all the variants that use it
-        by_value: dict[str, set] = {}
-        for members, s, _ in built:
-            by_value.setdefault(s.get("parm") or "", set()).update(fam.values(m) for m in members)
-        parms = [(condition_for(combos, fam), value) for value, combos in by_value.items()]
-        if len(parms) > 1:
-            var = re.sub(r"[^A-Za-z0-9]+", "_", step["step"]).strip("_").upper() + "_PARMS"
-            step["parm"] = f"${{{var}}}"
-            selects.append({"name": var, "select": [{"condition": c, "value": p or ""} for c, p in parms]})
-        if any(b[1].get("dds") for b in built):
-            sequences = {i: [json.dumps(dd, sort_keys=True) for dd in b[1].get("dds", [])]
-                         for i, b in enumerate(built)}
-            dds = []
-            for slot in merge_sequences(sequences):
-                i, j = next(iter(slot.items()))
-                dd = FlowDict(built[i][1]["dds"][j])
-                if len(slot) < len(built):
-                    members = [m for k in slot for m in built[k][0]]
-                    cond = combine_conditions(condition_for({fam.values(m) for m in members}, fam),
-                                              dd.pop("condition", None))
-                    dd["condition"] = cond
-                dds.append(dd)
-            step["dds"] = dds
-        return step
+    def _atoms(cond, assignments, props) -> frozenset:
+        """Flag/property combinations in which a step runs (a property condition fixes that property)."""
+        out = set()
+        for assign in assignments:
+            for pv in itertools.product((False, True), repeat=len(props)):
+                if cond:
+                    (kind, prop), = cond.items()
+                    if pv[props.index(prop)] != (kind == "exists"):
+                        continue
+                out.add(tuple(assign) + pv)
+        return frozenset(out)
 
-    @staticmethod
-    def place(step: dict, cond, used: set[str]) -> dict:
-        """Unique step name; the condition goes before maxRC, where single-variant tasks have it."""
-        name, n = step["step"], 2
-        while name in used:
-            name, n = f"{step['step']}_{n}", n + 1
-        used.add(name)
-        placed: dict = {}
-        for k, v in step.items():
-            if k == "condition":
-                continue
-            if k == "maxRC" and cond:
-                placed["condition"] = cond
-            placed[k] = name if k == "step" else v
-        if cond and "condition" not in placed:
-            placed["condition"] = cond
-        return placed
+    def _consolidate(self, target, space, order, info, atoms, seqs, conds, steps, variables):
+        """Merge same-role steps; returns (steps, new variables), verified equivalent to `steps`."""
+        index = {k: i for i, k in enumerate(order)}
+        items = [Item(info[k][0], atoms[k], conds[k]) for k in order]
+        # names a new variable must not shadow: existing variables, properties, any ${...} in use
+        reserved = set(variables) | set(space.props)
+        reserved |= set(re.findall(r"\$\{(\w+)\}", json.dumps([i.step for i in items])))
+        why: list[str] = []
+        result = _consolidate(items, [[index[k] for k in seq] for seq in seqs], space, reserved, why)
+        for msg in why:
+            self.note(target, "consolidate", msg)
+        problems = _verify(steps, result.steps, result.variables, space)
+        if problems:
+            raise ConsolidationError(f"consolidated task is not equivalent ({'; '.join(problems[:3])})")
+        return result.steps, result.variables
 
     @staticmethod
     def create_options(d: DataSetDef | None, member: bool) -> str:
@@ -446,6 +487,45 @@ class _Converter:
         pds = member or d.directory_blocks is not None
         opts.append("dsorg(PO) dsntype(library)" if pds else "dsorg(PS)")
         return " ".join(opts)
+
+
+def _predicate(assignments: list[tuple[bool, ...]], flags: list[str]) -> str:
+    """Smallest AND/OR expression over `flags` true for exactly `assignments`.
+
+    Merges pairs of terms that differ in one flag (Quine-McCluskey, one pass to
+    fixpoint). Returns "" when the step applies to every combination given.
+    """
+    terms = {tuple(a) for a in assignments}
+    changed = True
+    while changed:
+        changed = False
+        for x in sorted(terms, key=str):
+            for y in sorted(terms, key=str):
+                diff = [i for i, (p, q) in enumerate(zip(x, y)) if p != q]
+                if len(diff) == 1 and x[diff[0]] is not None and y[diff[0]] is not None:
+                    merged = tuple(None if i == diff[0] else v for i, v in enumerate(x))
+                    terms = (terms - {x, y}) | {merged}
+                    changed = True
+                    break
+            if changed:
+                break
+    rendered = []
+    for term in sorted(terms, key=lambda t: [(-1 if v is None else int(v)) for v in t], reverse=True):
+        parts = [(f"${{{f}}}" if v else f"${{{f}}} != true") for f, v in zip(flags, term) if v is not None]
+        if not parts:
+            return ""
+        rendered.append(" && ".join(parts))
+    if len(rendered) == 1:
+        return rendered[0]
+    return " || ".join(f"({r})" if " && " in r else r for r in rendered)
+
+
+def _combine(cond, predicate: str):
+    if not predicate:
+        return cond
+    if not cond:
+        return predicate
+    return {**cond, "eval": predicate}
 
 
 class FlowDict(dict):
@@ -484,39 +564,114 @@ def _dump(doc: dict) -> str:
     return _align_dds(text)
 
 
-def emit_all(sd: SystemDefinition, sources_map: dict[str, list[str]] | None = None,
-             variants: bool = True) -> Output:
-    conv = _Converter(sd, sources_map)
+FOLD_KEYS = {"variants", "unify_temp_space"}
+
+
+def _fold_spec(target: str, spec: dict) -> tuple[dict, list[str]]:
+    """(variants, unify_temp_space patterns) from either fold-map shape.
+
+    Shape 1 (older): {langdef name: {flag: bool}}.  Shape 2: {"variants": {...}, "unify_temp_space": [...]}.
+    """
+    if isinstance(spec.get("variants"), dict):
+        unknown = set(spec) - FOLD_KEYS
+        if unknown:
+            raise ValueError(f"fold {target!r}: unknown key(s) {sorted(unknown)}; expected {sorted(FOLD_KEYS)}")
+        patterns = spec.get("unify_temp_space") or []
+        if isinstance(patterns, str):
+            patterns = [patterns]
+        return spec["variants"], list(patterns)
+    return spec, []
+
+
+def emit_all(
+    sd: SystemDefinition,
+    sources_map: dict[str, list[str]] | None = None,
+    folds: dict[str, dict] | None = None,
+    version: str = SCHEMA_VERSION,
+    consolidate: bool = True,
+    variants: bool = True,
+) -> Output:
+    """Convert every language definition.
+
+    Folded tasks come from two places: the variant families `variants.py` detects (unless `variants`
+    is false) and the explicit `folds` of a fold map, which win for every language definition they
+    name. `folds` maps a target task name to {langdef name: {flag: bool}} (see _Converter.fold), or
+    to {"variants": {...}, "unify_temp_space": [DD name globs]}.
+    """
+    conv = _Converter(sd, sources_map, consolidate)
     out = Output()
-    families, family_notes = find_families(sd) if variants else ([], [])
-    for message in family_notes:
-        conv.note("variants", "grouping", message)
-    member_of = {m: fam for fam in families for m in fam.members}
+    specs = {target: _fold_spec(target, spec) for target, spec in (folds or {}).items()}
+    for target, (members, _) in specs.items():
+        missing = [n for n in members if n not in sd.langdefs]
+        if missing:
+            raise ValueError(f"fold {target!r}: unknown language definition(s) {missing}")
+        clash = target in sd.langdefs and target not in members
+        if clash:
+            raise ValueError(f"fold {target!r}: the task name belongs to a language definition outside the fold")
+        flags = [sorted(flags) for flags in members.values()]
+        if any(f != flags[0] for f in flags):
+            raise ValueError(f"fold {target!r}: every variant must set the same flags")
+        out.families.append(Family(target, sd.langdefs[next(iter(members))].language_code, flags[0],
+                                   {m: dict(v) for m, v in members.items()}, source="fold map"))
+    explicit = {n for members, _ in specs.values() for n in members}
+    aliases: dict[str, str] = {}  # langdef -> family member with the same translators
+    if variants:
+        families, family_notes = find_families(sd)
+        for message in family_notes:
+            conv.note("variants", "grouping", message)
+        for fam in families:
+            members = {m: v for m, v in fam.members.items() if m not in explicit}
+            task, features = fam.task, fam.features
+            if len(members) < len(fam.members):
+                conv.note(fam.task, "variants", f"{sorted(set(fam.members) - set(members))} are folded by the "
+                                                f"fold map; the detected family keeps {sorted(members)}")
+                if len(members) < 2:
+                    continue
+                # what is left: named after its plainest member, folded on the flags that still vary
+                features = [f for f in fam.features if len({v[f] for v in members.values()}) > 1]
+                members = {m: {f: v[f] for f in features} for m, v in members.items()}
+                task = min(members, key=lambda m: (sum(v != FEATURE_DEFAULTS.get(f, False)
+                                                       for f, v in members[m].items()), len(m), m))
+            if len(members) < 2 or not features:
+                continue
+            if task in specs or (task in sd.langdefs and task not in members):
+                conv.note(task, "variants", "detected family not folded: its task name is taken")
+                continue
+            specs[task] = (members, [])
+            kept = {a: c for a, c in fam.aliases.items() if c in members and a not in explicit}
+            aliases.update(kept)
+            out.families.append(Family(task, fam.language_code, features, members, kept))
+    member_of = {m: target for target, (members, _) in specs.items() for m in members}
+    by_task = {fam.task: fam for fam in out.families}
+
     tasks: list[str] = []
     task_variables: dict[str, list[str]] = {}
     for ld in sd.langdefs.values():
-        fam = member_of.get(ld.name)
-        task_name = fam.task if fam else ld.name
+        name = aliases.get(ld.name, ld.name)
+        target = member_of.get(name)
+        task_name = target or ld.name
         out.language_map[ld.name] = {
             "task": task_name,
-            "variables": dict(fam.members[ld.name]) if fam else {},
+            "variables": dict(specs[target][0][name]) if target else {},
         }
-        if task_name in tasks:
+        if task_name in tasks or ld.name in aliases:
             continue
-        task = conv.family(fam) if fam else conv.language(ld)
-        task_variables[task_name] = sorted(v["name"] for v in task.get("variables", []))
+        doc_task = conv.fold(target, *specs[target]) if target else conv.language(ld)
+        task_variables[task_name] = sorted(v["name"] for v in doc_task.get("variables", []))
         fname = f"{slug(task_name)}.yaml"
         if fname in out.files:
             fname = f"{slug(task_name)}_{len(out.files)}.yaml"
         header = ""
-        if fam:
+        if target:
+            fam = by_task[target]
             header = "# One task for these EWM language definitions (variants of one compiler):\n" + "".join(
                 f"#   {m}: {', '.join(f'{k}={str(v).lower()}' for k, v in vals.items())}\n"
-                for m, vals in fam.members.items())
-        out.files[fname] = header + _dump({"version": SCHEMA_VERSION, "tasks": [task]})
+                for m, vals in fam.members.items()) + "".join(
+                f"#   {a}: same translators as {c}\n" for a, c in fam.aliases.items())
+        out.files[fname] = header + _dump({"version": version, "tasks": [doc_task]})
         tasks.append(task_name)
     out.files["Languages.yaml"] = _dump({
-        "version": SCHEMA_VERSION,
+        "version": version,
         "include": [{"file": f} for f in out.files],
         "tasks": [{"stage": "Languages", "tasks": tasks}],
         "variables": [{"name": k, "value": v} for k, v in conv.sysvar_values.items()],
@@ -526,5 +681,4 @@ def emit_all(sd: SystemDefinition, sources_map: dict[str, list[str]] | None = No
         entry["taskVariables"] = task_variables[entry["task"]]
     out.notes = conv.notes
     out.properties = list(conv.properties)
-    out.families = families
     return out

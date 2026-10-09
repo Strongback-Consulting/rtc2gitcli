@@ -3,7 +3,7 @@
 #
 # Usage: tools/migrate-zos -r <repo> -s <stream>[=<branch>] [-s <stream>[=<branch>] ...] -x <sysdef-export.xml>
 #                          -w <work-dir> -t <target-repo> [-m <migration.properties>] [-c <schema.json>]
-#                          [-S <source-ws>] [-T <target-ws>]
+#                          [-f <fold-map.yaml>] [-S <source-ws>] [-T <target-ws>]
 #
 #   -r  repository URI or nickname for scm (log in first: scm login -r <uri> -u <user> -n <nick> -c)
 #   -s  stream to migrate, optionally with its branch name. The first stream is the main line (branch main
@@ -16,6 +16,8 @@
 #   -t  new repository in the target layout (zOSsrc -> src, dbb-app.yaml on every branch); must not exist
 #   -m  migration properties (default: migration.properties of this repository)
 #   -c  zBuilder JSON schema: every generated YAML file must validate against it
+#   -f  fold map for ewm2zbuilder: language definitions to fold into one task, in addition to (and
+#       overriding) the variant families it detects
 #   -S/-T  names of the source/target repository workspaces of the first stream (default:
 #       rtc2git-<stream>-source/-target, as for the other streams); created from the stream when they do not exist
 #
@@ -32,17 +34,17 @@ set -eu
 
 HERE=$(cd "$(dirname "$0")/.." && pwd)
 SCM=${SCM:-scm}
-REPO= STREAMS= PRIMARY= EXPORT= WORK= TARGET= SCHEMA= SOURCE_WS= TARGET_WS=
+REPO= STREAMS= PRIMARY= EXPORT= WORK= TARGET= SCHEMA= FOLDS= SOURCE_WS= TARGET_WS=
 PROPERTIES="$HERE/migration.properties"
 NL='
 '
 
-while getopts r:s:x:w:t:m:c:S:T: opt; do
+while getopts r:s:x:w:t:m:c:f:S:T: opt; do
   case $opt in
     r) REPO=$OPTARG ;; s) STREAMS="$STREAMS$OPTARG$NL" ;; x) EXPORT=$OPTARG ;; w) WORK=$OPTARG ;;
-    t) TARGET=$OPTARG ;; m) PROPERTIES=$OPTARG ;; c) SCHEMA=$OPTARG ;;
+    t) TARGET=$OPTARG ;; m) PROPERTIES=$OPTARG ;; c) SCHEMA=$OPTARG ;; f) FOLDS=$OPTARG ;;
     S) SOURCE_WS=$OPTARG ;; T) TARGET_WS=$OPTARG ;;
-    *) sed -n '2,32p' "$0" >&2; exit 2 ;;
+    *) sed -n '2,35p' "$0" >&2; exit 2 ;;
   esac
 done
 for required in REPO STREAMS EXPORT WORK TARGET; do
@@ -54,6 +56,8 @@ absolute() { case $1 in /*) printf '%s' "$1" ;; *) printf '%s/%s' "$(pwd)" "$1" 
 EXPORT=$(absolute "$EXPORT"); WORK=$(absolute "$WORK"); TARGET=$(absolute "$TARGET")
 PROPERTIES=$(absolute "$PROPERTIES")
 [ -z "$SCHEMA" ] || SCHEMA=$(absolute "$SCHEMA")
+[ -z "$FOLDS" ] || FOLDS=$(absolute "$FOLDS")
+[ -z "$FOLDS" ] || [ -f "$FOLDS" ] || { echo "fold map not found: $FOLDS" >&2; exit 1; }
 [ -f "$EXPORT" ] || { echo "system definition export not found: $EXPORT" >&2; exit 1; }
 [ -z "$SCHEMA" ] || [ -f "$SCHEMA" ] || { echo "schema not found: $SCHEMA" >&2; exit 1; }
 [ -f "$PROPERTIES" ] || { echo "migration properties not found: $PROPERTIES" >&2; exit 1; }
@@ -61,6 +65,8 @@ PROPERTIES=$(absolute "$PROPERTIES")
 slug() { printf '%s' "$1" | tr -c 'A-Za-z0-9' '-' | tr 'A-Z' 'a-z' | sed 's/--*/-/g; s/^-//; s/-$//'; }
 SCHEMA_ARG=
 [ -z "$SCHEMA" ] || SCHEMA_ARG="--schema $SCHEMA"
+FOLD_ARG=
+[ -z "$FOLDS" ] || FOLD_ARG="--fold-map $FOLDS"
 COUNT=$(printf '%s' "$STREAMS" | grep -c .)
 
 INDEX=0
@@ -101,7 +107,7 @@ IFS=$OLD_IFS
 
 echo "== 2/3 shared zBuilder configuration from $EXPORT into $WORK/zbuilder"
 # shellcheck disable=SC2086
-(cd "$HERE/ewm2zbuilder" && uv run ewm2zbuilder "$EXPORT" -o "$WORK/zbuilder" $SCHEMA_ARG)
+(cd "$HERE/ewm2zbuilder" && uv run ewm2zbuilder "$EXPORT" -o "$WORK/zbuilder" $SCHEMA_ARG $FOLD_ARG)
 
 echo "== 3/3 target repository $TARGET (every branch)"
 # shellcheck disable=SC2086
